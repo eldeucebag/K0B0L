@@ -156,6 +156,21 @@ class ChatUI(ChatHooks):
 
         return list_skills(self.session.workspace.root)
 
+    def _skills_all(self) -> list[Any]:
+        """Every discovered skill: the progressive-disclosure index source.
+
+        The system prompt is built *inside* ChatSession.__init__, so the
+        session attribute does not exist yet on the first call; an empty
+        index then is correct (nothing is discovered before the workspace
+        is known).
+        """
+        session = getattr(self, "session", None)
+        if session is None:
+            return []
+        from .skills import list_skills
+
+        return list_skills(session.workspace.root)
+
     def _skills_active(self) -> list[Any]:
         from .skills import read_skill
 

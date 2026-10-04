@@ -71,6 +71,25 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
 END;
 CREATE INDEX IF NOT EXISTS memories_domain ON memories(domain);
 CREATE INDEX IF NOT EXISTS memories_created ON memories(created);
+
+-- The graph layer: typed, weighted edges between memories. An edge is a
+-- claim that two facts belong in the same thought -- written explicitly
+-- (connect()) or derived (shared domain, co-mention of the other's body).
+-- Hop-recall walks it: Tier 1 (FTS5) finds the entry points, this table
+-- expands the neighbourhood, the survey's short-circuit stays in the caller.
+CREATE TABLE IF NOT EXISTS memory_edges (
+    from_id     INTEGER NOT NULL,
+    to_id       INTEGER NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'related',
+    weight      REAL NOT NULL DEFAULT 0.5,
+    origin      TEXT NOT NULL DEFAULT 'derived',
+    created     REAL NOT NULL,
+    PRIMARY KEY (from_id, to_id, kind),
+    FOREIGN KEY (from_id) REFERENCES memories(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS memory_edges_from ON memory_edges(from_id);
+CREATE INDEX IF NOT EXISTS memory_edges_to ON memory_edges(to_id);
 """
 
 
@@ -118,6 +137,8 @@ class MemoryStore:
         self.path = Path(path)
         self._db = sqlite3.connect(str(self.path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        # CASCADE deletes on the edge table need the pragma, per connection.
+        self._db.execute("PRAGMA foreign_keys = ON")
         self._db.executescript(_SCHEMA)
         self._db.commit()
 
@@ -162,8 +183,13 @@ class MemoryStore:
             (body, domain, model, session, source, importance,
              time.time(), json.dumps(meta or {})),
         )
+        new_id = int(cursor.lastrowid or 0)
         self._db.commit()
-        return int(cursor.lastrowid or 0)
+        # Graph edges are derived at write time, not on every read: the
+        # co-mention scan is O(store) once per new fact, which is the cheap
+        # end of the trade.
+        self._derive_edges(new_id, body, domain)
+        return new_id
 
     def forget(self, memory_id: int) -> bool:
         """Delete one row. Returns whether it existed."""
@@ -172,6 +198,98 @@ class MemoryStore:
         )
         self._db.commit()
         return cursor.rowcount > 0
+
+    # -- graph -------------------------------------------------------------
+    def connect(self, from_id: int, to_id: int, *, kind: str = "related",
+                weight: float = 0.8, origin: str = "explicit") -> bool:
+        """Link two memories. The edge is the claim they belong together.
+
+        The model's own judgement, recorded: an explicit edge survives even
+        after both bodies drift, and hop-recall uses it exactly as surely as
+        a derived one. Refuses self-edges; idempotent on re-assert (the
+        stronger weight and explicit origin win).
+        """
+        if from_id == to_id:
+            return False
+        for a, b in ((from_id, to_id), (to_id, from_id)):
+            self._db.execute(
+                "INSERT INTO memory_edges (from_id, to_id, kind, weight,"
+                " origin, created) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (from_id, to_id, kind) DO UPDATE SET"
+                " weight = MAX(weight, excluded.weight),"
+                " origin = CASE WHEN excluded.origin = 'explicit'"
+                "   THEN 'explicit' ELSE origin END",
+                (a, b, kind, min(1.0, max(0.0, weight)), origin, time.time()),
+            )
+        self._db.commit()
+        return True
+
+    def _derive_edges(self, memory_id: int, body: str, domain: str) -> None:
+        """Cheap structural links for a fresh memory, written at remember() time.
+
+        Two facts in the same domain get a weak 'domain' edge (they share a
+        scope, which is a real but weak claim), and any older memory whose
+        body shares distinctive words with this one gets a stronger
+        'co_mention' edge. Both are marked derived, so an explicit connect()
+        can outrank them without deleting them.
+        """
+        rows = self._db.execute(
+            "SELECT id, body, domain FROM memories WHERE id != ?", (memory_id,)
+        ).fetchall()
+        words = {w for w in re.findall(r"[a-z0-9]{4,}", body.lower())}
+        for row in rows:
+            old_words = {w for w in re.findall(r"[a-z0-9]{4,}", row["body"].lower())}
+            overlap = len(words & old_words)
+            if overlap >= 2:
+                weight = min(0.9, 0.3 + 0.1 * overlap)
+                kind = "co_mention"
+            elif domain and row["domain"] == domain:
+                weight, kind = 0.3, "domain"
+            else:
+                continue
+            for a, b in ((memory_id, row["id"]), (row["id"], memory_id)):
+                self._db.execute(
+                    "INSERT OR REPLACE INTO memory_edges (from_id, to_id, kind,"
+                    " weight, origin, created) VALUES (?, ?, ?, ?, 'derived', ?)",
+                    (a, b, kind, weight, time.time()),
+                )
+        self._db.commit()
+
+    def neighbors(self, memory_id: int, *, hops: int = 1,
+                  limit: int = 8) -> list[Memory]:
+        """Hop-recall: the memory's graph neighbourhood, nearest first.
+
+        One hop is the useful radius (the survey's Tier 2): the entry point's
+        direct neighbours, ranked by edge weight then the same
+        importance/recency ranking as lexical recall. Two hops are offered for
+        the rare chain (A -> B -> C) but capped, because a walk past two hops
+        on a co-mention graph is mostly noise.
+        """
+        seen = {memory_id}
+        frontier = [memory_id]
+        collected: list[tuple[float, sqlite3.Row]] = []
+        for _hop in range(max(1, min(hops, 2))):
+            next_frontier: list[int] = []
+            for source in frontier:
+                rows = self._db.execute(
+                    "SELECT m.*, e.weight AS hop_weight FROM memory_edges e"
+                    " JOIN memories m ON m.id = e.to_id"
+                    " WHERE e.from_id = ? ORDER BY e.weight DESC,"
+                    " m.importance DESC, m.created DESC",
+                    (source,),
+                ).fetchall()
+                for row in rows:
+                    if row["id"] in seen:
+                        continue
+                    seen.add(int(row["id"]))
+                    next_frontier.append(int(row["id"]))
+                    collected.append((float(row["hop_weight"]), row))
+            frontier = next_frontier
+            if not frontier:
+                break
+        collected.sort(key=lambda pair: (-pair[0], -pair[1]["importance"],
+                                         -pair[1]["created"]))
+        return [self._row(row) for _w, row in collected[:limit]]
 
     # -- reads -------------------------------------------------------------
     def recall(

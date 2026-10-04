@@ -247,6 +247,16 @@ class ChatSession:
         else:
             parts.append(DEFAULT_SYSTEM)
         parts.append(f"Your working directory is {self.workspace.root}.")
+        # Two skill channels. Every discovered skill contributes one index
+        # line to the system message (progressive disclosure: name +
+        # description, body on demand via load_skill). Separately, the
+        # operator's explicitly enabled skills ride their whole body, the
+        # way /skills enable has always worked.
+        all_skills = getattr(self.hooks, "_skills_all", lambda: [])()
+        if all_skills:
+            from .skills import skills_index
+
+            parts.append(skills_index(all_skills))
         skills = getattr(self.hooks, "_skills_active", lambda: [])()
         if skills:
             from .skills import SKILL_INTRO
@@ -523,6 +533,20 @@ class ChatSession:
         """
         if text.strip():
             self.messages.append({"role": "user", "content": text})
+            # Keyword triggers: a skill whose declared keywords match this
+            # turn rides its body for this turn only. The notice is the
+            # operator's window into a doctrine firing; the message is a
+            # system note so a later /clear cannot strip it from the model's
+            # account of how it knew.
+            from .skills import triggered_skills
+
+            all_skills = getattr(self.hooks, "_skills_all", lambda: [])()
+            for skill in triggered_skills(all_skills, text):
+                self.hooks.notice(f"skill triggered: {skill.name}")
+                self.messages.append(
+                    {"role": "system",
+                     "content": f"Skill {skill.name} applies this turn:\n\n{skill.body}"}
+                )
         self._trim()
         final = ""
         tool_call_retry_used = False

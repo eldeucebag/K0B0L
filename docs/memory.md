@@ -40,6 +40,19 @@ Duplicates converge: remembering the same body in the same domain raises the
 existing row's importance rather than stacking a twin, so the store stays
 relevant instead of bloating as runs re-derive the same facts.
 
+## The graph layer
+
+Memories are also a graph, not just a table. Writing a fact derives edges —
+a **co_mention** edge (strong) to any older fact sharing its distinctive
+words, a **domain** edge (weak) to same-domain facts — and the model can
+write explicit edges of its own judgement. Hop-recall (`neighbors` in the
+store) walks a fact's neighbourhood, ranked by edge weight; Tier 1 (FTS5)
+finds the entry point, the graph expands the thought around it.
+
+Edges are typed and carry their origin (`derived` or `explicit`), so an
+explicit claim outranks a structural guess without deleting it, and
+forgetting a memory cascades to its edges.
+
 ## The model's own instructions
 
 The system prompt teaches the mechanic and leaves the judgement to the

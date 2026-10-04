@@ -435,6 +435,7 @@ class Workspace:
             "ask_user_choice": self.ask_user_choice,
             "remember": self.remember,
             "recall": self.recall,
+            "load_skill": self.load_skill,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -618,6 +619,36 @@ class Workspace:
             out.append(f"- {row.body}{scope} ({stamp}{who})")
         return ToolResult(True, "\n".join(out))
 
+    def load_skill(self, name: str) -> ToolResult:
+        """Load one skill's full body on demand (progressive disclosure).
+
+        The system message carries only each skill's name and description;
+        this is how the model opens one before working in its area. The
+        body returns as the tool result, which lands in the conversation
+        where the model (and the operator) can both see it.
+
+        Discovery happens here, from the workspace root, rather than through
+        the front end's skill list: the ChatSession is what the workspace
+        holds as ``ui``, and it has no reason to carry a skills index of its
+        own.
+        """
+        from .skills import list_skills, read_skill
+
+        all_skills = list_skills(self.root)
+        if not all_skills:
+            return ToolResult(False, "no skills are installed in this harness")
+        skill = read_skill(all_skills, name or "")
+        if skill is None:
+            known = ", ".join(s.name for s in all_skills[:12])
+            return ToolResult(False, f"no skill named {name!r}; installed: {known}")
+        parts = [skill.body]
+        if skill.resources:
+            parts.append(
+                "\nResources beside this skill (read_file them as needed): "
+                + ", ".join(p.name for p in skill.resources)
+            )
+        return ToolResult(True, "\n".join(parts))
+
 
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict:
     return {
@@ -770,6 +801,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         [],
+    ),
+    _schema(
+        "load_skill",
+        "Open one installed skill's full procedure. The system message lists "
+        "every skill by name; call this before working in a skill's area.",
+        {
+            "name": {
+                "type": "string",
+                "description": "Skill name from the list (prefixes work)",
+            },
+        },
+        ["name"],
     ),
 ]
 
