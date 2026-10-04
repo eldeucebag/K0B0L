@@ -66,3 +66,19 @@ activates itself.
 `/skills list` shows what is installed, `/skills enable|disable <name>`
 pins or unpins a body into every turn. The View → Skills menu is the same
 list.
+
+## The editor
+
+`/skills edit [name]` (or View → Skills → Edit skills…) opens a two-column
+editor: installed skills on the left, the raw `SKILL.md` — frontmatter and
+body exactly as on disk — on the right. **F2** saves (validating that the
+frontmatter parses with a name and description, and the body is not
+empty), **ctrl-n** starts a new skill from the template in
+`<root>/skills/`, **ctrl-d** deletes the open skill, **Esc** closes.
+
+Saves take effect immediately: closing the editor re-scans and rebuilds
+the system prompt, so a new skill appears in the index on the next turn.
+New skills are created in the workspace, never the profile directory —
+the shadowing rule makes a workspace copy the correct way to override a
+global skill anyway. The editor edits the file as-is because the format
+is the portability contract; an editor that hid it would be a lesser tool.

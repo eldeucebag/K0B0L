@@ -999,6 +999,186 @@ class MultiSelectPicker(ModalScreen[list[str] | None]):
         self.dismiss(None)
 
 
+class SkillsEditor(ModalScreen[str | None]):
+    """Create, edit, and delete skills without leaving the chat.
+
+    The left column lists every discovered skill with its scope (workspace
+    or profile); the right column is a plain TextArea over the raw SKILL.md
+    -- frontmatter and body exactly as on disk, because the format is the
+    portability contract and an editor that hid it would be a different,
+    lesser tool. F2 saves (validating that the frontmatter parses and has a
+    name), ctrl-n starts a new skill from the template, ctrl-d deletes the
+    open one after a confirm.
+
+    Writing goes to the skill's own file; a new skill is created in the
+    workspace (``<root>/skills/<slug>/SKILL.md``), never the profile dir --
+    the operator's global skills are read-mostly from the chat's point of
+    view, and the shadowing rule means a workspace copy is the correct way
+    to override one anyway.
+    """
+
+    BINDINGS = [
+        Binding("f2", "save", "save", priority=True),
+        Binding("escape", "cancel", "cancel", priority=True),
+        Binding("ctrl-n", "new", "new"),
+        Binding("ctrl-d", "delete", "delete"),
+    ]
+
+    TEMPLATE = (
+        "---\n"
+        "name: my-skill\n"
+        "description: One line saying when this skill applies.\n"
+        "trigger:\n"
+        "  keywords: []\n"
+        "---\n\n"
+        "# My Skill\n\n"
+        "1. First step of the procedure.\n"
+        "2. Second step.\n"
+    )
+
+    def __init__(self, config: Any, select: str = "", **kw: Any) -> None:
+        super().__init__(**kw)
+        self.config = config
+        self.initial = select
+        from .skills import list_skills
+
+        self.skills = list_skills(Path(config.chat.root))
+        self.current: Path | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("skills editor — ↑/↓ pick · F2 save · ctrl-n new · ctrl-d delete · Esc close",
+                   classes="modal-title"),
+            Horizontal(
+                Static("", id="skill-list", classes="modal-input"),
+                Vertical(
+                    TextArea("", id="skill-body", classes="modal-input"),
+                    Static("", id="skill-status", classes="modal-status"),
+                ),
+                id="skill-columns",
+            ),
+            id="skill-editor-wrap",
+        )
+
+    def on_mount(self) -> None:
+        self._repaint_list()
+        if self.initial:
+            self._open(self.initial)
+        elif self.skills:
+            self._open(self.skills[0].path)
+        else:
+            self.action_new()
+
+    # -- helpers -----------------------------------------------------------
+    def _repaint_list(self) -> None:
+        from .skills import list_skills
+
+        self.skills = list_skills(Path(self.config.chat.root))
+        root = Path(self.config.chat.root)
+        lines = []
+        for skill in self.skills:
+            in_ws = root in skill.path.parents
+            scope = "ws" if in_ws else "~"
+            mark = "❯ " if self.current and skill.path == self.current else "  "
+            lines.append(f"{mark}{skill.name}  [{scope}]")
+        self.query_one("#skill-list", Static).update(
+            "\n".join(lines) if lines else "(no skills — ctrl-n to create one)"
+        )
+
+    def _open(self, which: str | Path) -> bool:
+        from .skills import read_skill
+
+        target = None
+        for skill in self.skills:
+            if str(which) in (skill.name, skill.path.stem, skill.path.parent.name,
+                              str(skill.path)):
+                target = skill
+                break
+        if target is None and isinstance(which, Path) and which.is_file():
+            target = read_skill([s for s in self.skills], str(which))
+        if target is None:
+            return False
+        self.current = target.path
+        editor = self.query_one("#skill-body", TextArea)
+        editor.text = target.path.read_text(encoding="utf-8")
+        self._status(f"editing {target.path}")
+        self._repaint_list()
+        return True
+
+    def _status(self, text: str) -> None:
+        self.query_one("#skill-status", Static).update(text)
+
+    # -- validation ----------------------------------------------------------
+    def _parsed(self) -> tuple[dict[str, Any], str]:
+        """(frontmatter, body) of the editor's text, or ({}, '') on a bad fence."""
+        text = self.query_one("#skill-body", TextArea).text
+        from .skills import _FRONTMATTER_RE, _parse_yaml
+
+        match = _FRONTMATTER_RE.match(text)
+        if not match:
+            return {}, text
+        return _parse_yaml(match.group(1)), text[match.end():]
+
+    def _validate(self) -> str:
+        meta, body = self._parsed()
+        name = str(meta.get("name") or "").strip()
+        if not name:
+            return "frontmatter needs a name: (no frontmatter, or name: is empty)"
+        if not str(meta.get("description") or "").strip():
+            return "frontmatter needs a description: one line saying when it applies"
+        if not body.strip():
+            return "the body is empty — a skill is its procedure"
+        return ""
+
+    # -- actions ---------------------------------------------------------------
+    def action_save(self) -> None:
+        problem = self._validate()
+        if problem:
+            self._status(f"not saved — {problem}")
+            return
+        text = self.query_one("#skill-body", TextArea).text
+        assert self.current is not None
+        self.current.parent.mkdir(parents=True, exist_ok=True)
+        self.current.write_text(text, encoding="utf-8")
+        meta, _body = self._parsed()
+        self._status(f"saved {self.current}")
+        self._repaint_list()
+
+    def action_new(self) -> None:
+        root = Path(self.config.chat.root) / "skills"
+        base = "my-skill"
+        slug, n = base, 2
+        while (root / slug).exists():
+            slug = f"{base}-{n}"
+            n += 1
+        self.current = root / slug / "SKILL.md"
+        editor = self.query_one("#skill-body", TextArea)
+        editor.text = self.TEMPLATE
+        self._status(f"new skill — edit and F2 to save to {self.current}")
+        self._repaint_list()
+
+    def action_delete(self) -> None:
+        if self.current is None:
+            return
+        doomed = self.current
+        if doomed.parent.is_dir() and (doomed.parent / "SKILL.md") == doomed:
+            import shutil
+
+            shutil.rmtree(doomed.parent)
+        else:
+            doomed.unlink(missing_ok=True)
+        self.current = None
+        self._repaint_list()
+        if self.skills:
+            self._open(self.skills[0].path)
+        else:
+            self.query_one("#skill-body", TextArea).text = ""
+            self._status("deleted; ctrl-n to create a new skill")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class OptionsScreen(ModalScreen[None]):
     """Theme + remembered Ollama endpoints (stored as a small JSON file)."""
 
@@ -1265,6 +1445,19 @@ class ChatApp(App[Any]):
         border: solid $accent; background: $surface; padding: 0 2;
         width: 84; height: auto; max-height: 40%;
     }
+    /* The skills editor is a workspace, not a strip: full width, nearly full
+       height, two columns. */
+    #skill-editor-wrap {
+        border: solid $accent; background: $surface; padding: 0 1;
+        width: 96%; height: 88%;
+    }
+    #skill-columns { height: 1fr; }
+    #skill-list {
+        width: 30; height: auto; max-height: 100%;
+        background: $surface-darken-2; padding: 0 1;
+    }
+    #skill-body { height: 1fr; }
+    #skill-status { height: 1; }
     .modal-title { background: $surface-lighten-1; color: $text; padding: 0 1; }
     .modal-status { color: $text-muted; padding-top: 1; }
     .modal-input { background: $surface-darken-2; }
@@ -1693,18 +1886,35 @@ class TextualChatUI(ChatUI):
         self.line("lines already in the transcript keep the theme they arrived under")
 
     def dispatch(self, text: str) -> bool:
-        """/theme and /semantic, then everything the other front ends answer."""
-        if text.strip().lower().startswith("/theme") and (
-            len(text.strip()) == 6 or text.strip()[6].isspace()
+        """/theme, /semantic, and /skills edit, then everything else."""
+        lowered = text.strip().lower()
+        if lowered.startswith("/theme") and (
+            len(lowered) == 6 or lowered[6].isspace()
         ):
             self._theme_command(text.strip()[6:])
             return True
-        if text.strip().lower().startswith("/semantic") and (
-            len(text.strip()) == 9 or text.strip()[9].isspace()
+        if lowered.startswith("/semantic") and (
+            len(lowered) == 9 or lowered[9].isspace()
         ):
             self._semantic_command(text.strip()[9:])
             return True
+        if lowered.startswith("/skills") and lowered.split()[1:2] == ["edit"]:
+            self._open_skills_editor(text.strip().split(" ", 2)[-1].strip()
+                                     if len(text.strip().split()) > 2 else "")
+            return True
         return super().dispatch(text)
+
+    def _open_skills_editor(self, select: str = "") -> None:
+        """Push the skills editor; on close, rebuild prompts (skills changed)."""
+        if self.app is None:
+            return
+        self.app.push_screen(SkillsEditor(self.config, select=select),
+                             lambda _result: self._skills_editor_closed())
+
+    def _skills_editor_closed(self) -> None:
+        """The editor may have created, changed, or deleted a skill."""
+        self.session.reset()
+        self.line("skills re-scanned; system prompt rebuilt")
 
     def _skills_submenu(self) -> list[MenuItem]:
         from .skills import list_skills
@@ -1718,6 +1928,8 @@ class TextualChatUI(ChatUI):
             )))
         if not items:
             items = [MenuItem(label="(no skills in workspace/skills or ~/.k0b0l-skills)")]
+        items.append(MenuItem(label="Edit skills…",
+                              action=lambda: self._open_skills_editor()))
         return items
 
     # -- engine-facing hooks ------------------------------------------------

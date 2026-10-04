@@ -48,7 +48,8 @@ HELP = """commands
   /read <path>       print a file into the chat
   /docs [topic]      list the product docs, or print one (the model has read_docs)
   /soul              show the soul file this session loaded
-  /skills list|enable|disable   manage prompt-injection skills
+  /skills list|enable|disable   manage skills: list, or pin one into every turn
+  /skills edit [name]          open the skills editor (Textual front end)
   /session save|load|list <name>  persist or resume this chat
   /run start|status|tail|stop   spawn and watch a cycle run (operator-only)
   /paste             read a multi-line block; finish with a line containing only .
@@ -382,8 +383,13 @@ class ChatUI(ChatHooks):
                     self._selected_skills = [n for n in self._selected_skills if n != rest]
                     self.session.reset()
                     self.line(f"skills active: {', '.join(self._selected_skills) or '(none)'}")
+            elif verb == "edit":
+                # Only the full-screen front end has a modal editor; the base
+                # says so rather than pretending a line mode could host one.
+                self.line("the skills editor needs the Textual front end "
+                          "(start the chat without --chat-plain)")
             else:
-                self.line("usage: /skills list | /skills enable <name> | /skills disable <name>")
+                self.line("usage: /skills list | enable <name> | disable <name> | edit [name]")
         elif command == "/mcp":
             self._command_mcp(argument)
         elif command == "/exec":

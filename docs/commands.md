@@ -12,7 +12,8 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/read <path>` | Print a workspace file into the chat |
 | `/docs [topic]` | List the product docs, or print one |
 | `/soul` | Show the soul file this session loaded, and its path |
-| `/skills list\|enable\|disable <name>` | Manage prompt-injection skills |
+| `/skills list\|enable\|disable <name>` | Manage skills: list, or pin/unpin one into every turn |
+| `/skills edit [name]` | Open the skills editor (see `docs/skills`); a name opens that skill directly |
 | `/session save\|load\|list <name>` | Persist or resume a conversation |
 | `/run start [key=value ...] <objective>` | Spawn a cycle run |
 | `/run status\|tail [N]\|stop` | Watch or stop the current run |
