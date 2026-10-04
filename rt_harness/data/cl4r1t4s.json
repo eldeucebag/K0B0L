@@ -1,0 +1,999 @@
+{
+  "source": "https://github.com/elder-plinius/CL4R1T4S",
+  "ref": "main",
+  "raw_base": "https://raw.githubusercontent.com/elder-plinius/CL4R1T4S/main",
+  "note": "ordering is derived from the filename (explicit date first, then version) and is a convenience default, not a claim about which prompt a vendor currently serves. Pick a variant explicitly when it matters.",
+  "families": {
+    "anthropic": [
+      {
+        "variant": "Claude_Sonnet-4.5_Sep-29-2025.txt",
+        "repo_path": "ANTHROPIC/Claude_Sonnet-4.5_Sep-29-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          9,
+          29
+        ],
+        "version": [
+          4,
+          5
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-09-29"
+      },
+      {
+        "variant": "Claude_Code_03-04-24.md",
+        "repo_path": "ANTHROPIC/Claude_Code_03-04-24.md",
+        "ext": ".md",
+        "date": [
+          2024,
+          3,
+          4
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "CLAUDE-OPUS-5.5.md",
+        "repo_path": "ANTHROPIC/CLAUDE-OPUS-5.5.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          5,
+          5
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude-Fable-5.1.md",
+        "repo_path": "ANTHROPIC/Claude-Fable-5.1.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          5,
+          1
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "OPUS-5.md",
+        "repo_path": "ANTHROPIC/OPUS-5.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          5,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "CLAUDE-FABLE-5.md",
+        "repo_path": "ANTHROPIC/CLAUDE-FABLE-5.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          5,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude-Opus-4.7.txt",
+        "repo_path": "ANTHROPIC/Claude-Opus-4.7.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          7
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude_Opus_4.6.txt",
+        "repo_path": "ANTHROPIC/Claude_Opus_4.6.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          6
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude-4.5-Opus.txt",
+        "repo_path": "ANTHROPIC/Claude-4.5-Opus.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          5
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude-4.1.txt",
+        "repo_path": "ANTHROPIC/Claude-4.1.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          1
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude_4.txt",
+        "repo_path": "ANTHROPIC/Claude_4.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude_Sonnet_3.7_New.txt",
+        "repo_path": "ANTHROPIC/Claude_Sonnet_3.7_New.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          3,
+          7
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude_Sonnet_3.5.md",
+        "repo_path": "ANTHROPIC/Claude_Sonnet_3.5.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          3,
+          5
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "UserStyle_Modes.md",
+        "repo_path": "ANTHROPIC/UserStyle_Modes.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Claude-Design-Sys-Prompt.txt",
+        "repo_path": "ANTHROPIC/Claude-Design-Sys-Prompt.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "bolt": [
+      {
+        "variant": "Bolt.txt",
+        "repo_path": "BOLT/Bolt.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "brave": [
+      {
+        "variant": "LEO_Aug-31-2025",
+        "repo_path": "BRAVE/LEO_Aug-31-2025",
+        "ext": "",
+        "date": [
+          2025,
+          8,
+          31
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-08-31"
+      }
+    ],
+    "cline": [
+      {
+        "variant": "Cline.md",
+        "repo_path": "CLINE/Cline.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "cluely": [
+      {
+        "variant": "Cluely.mkd",
+        "repo_path": "CLUELY/Cluely.mkd",
+        "ext": ".mkd",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "cursor": [
+      {
+        "variant": "Cursor_2.0_Sys_Prompt.txt",
+        "repo_path": "CURSOR/Cursor_2.0_Sys_Prompt.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "version 2.0"
+      },
+      {
+        "variant": "Cursor_Prompt.md",
+        "repo_path": "CURSOR/Cursor_Prompt.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Cursor_Tools.md",
+        "repo_path": "CURSOR/Cursor_Tools.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": true
+      }
+    ],
+    "devin": [
+      {
+        "variant": "Devin2_09-08-2025.md",
+        "repo_path": "DEVIN/Devin2_09-08-2025.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          9,
+          8
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-09-08"
+      },
+      {
+        "variant": "Devin_2.0.md",
+        "repo_path": "DEVIN/Devin_2.0.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Devin_2.0_Commands.md",
+        "repo_path": "DEVIN/Devin_2.0_Commands.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": true
+      }
+    ],
+    "dia": [
+      {
+        "variant": "Dia_DraftSkill.txt",
+        "repo_path": "DIA/Dia_DraftSkill.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      },
+      {
+        "variant": "Dia_CodingSkill.txt",
+        "repo_path": "DIA/Dia_CodingSkill.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "factory": [
+      {
+        "variant": "DROID.txt",
+        "repo_path": "FACTORY/DROID.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "google": [
+      {
+        "variant": "Gemini-2.5-Pro-04-18-2025.md",
+        "repo_path": "GOOGLE/Gemini-2.5-Pro-04-18-2025.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          4,
+          18
+        ],
+        "version": [
+          2,
+          5
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-04-18"
+      },
+      {
+        "variant": "Gemini_Gmail_Assistant.txt",
+        "repo_path": "GOOGLE/Gemini_Gmail_Assistant.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Gemini_Diffusion.md",
+        "repo_path": "GOOGLE/Gemini_Diffusion.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "hume": [
+      {
+        "variant": "Hume_Voice_AI.md",
+        "repo_path": "HUME/Hume_Voice_AI.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "lovable": [
+      {
+        "variant": "Lovable_2.0.txt",
+        "repo_path": "LOVABLE/Lovable_2.0.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "version 2.0"
+      }
+    ],
+    "manus": [
+      {
+        "variant": "Manus_Prompt.txt",
+        "repo_path": "MANUS/Manus_Prompt.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      },
+      {
+        "variant": "Manus_Functions.txt",
+        "repo_path": "MANUS/Manus_Functions.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": true
+      }
+    ],
+    "meta": [
+      {
+        "variant": "Muse_Spark_Apr-08-26.txt",
+        "repo_path": "META/Muse_Spark_Apr-08-26.txt",
+        "ext": ".txt",
+        "date": [
+          2026,
+          4,
+          8
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2026-04-08"
+      },
+      {
+        "variant": "Llama4_WhatsApp.txt",
+        "repo_path": "META/Llama4_WhatsApp.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "minimax": [
+      {
+        "variant": "MiniMax.txt",
+        "repo_path": "MINIMAX/MiniMax.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "mistral": [
+      {
+        "variant": "LeChat.md",
+        "repo_path": "MISTRAL/LeChat.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "moonshot": [
+      {
+        "variant": "Kimi_2_July-11-2025.txt",
+        "repo_path": "MOONSHOT/Kimi_2_July-11-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          7,
+          11
+        ],
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-07-11"
+      },
+      {
+        "variant": "Kimi_K2_Thinking.txt",
+        "repo_path": "MOONSHOT/Kimi_K2_Thinking.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "multion": [
+      {
+        "variant": "MultiOn.md",
+        "repo_path": "MULTION/MultiOn.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "openai": [
+      {
+        "variant": "Atlas_10-21-25.txt",
+        "repo_path": "OPENAI/Atlas_10-21-25.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          10,
+          21
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-10-21"
+      },
+      {
+        "variant": "ChatKit_Docs__Oct-6-25.txt",
+        "repo_path": "OPENAI/ChatKit_Docs__Oct-6-25.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          10,
+          6
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT-4o_Sep-27-25.txt",
+        "repo_path": "OPENAI/ChatGPT-4o_Sep-27-25.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          9,
+          27
+        ],
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Codex_Sep-15-2025.md",
+        "repo_path": "OPENAI/Codex_Sep-15-2025.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          9,
+          15
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT5-08-07-2025.mkd",
+        "repo_path": "OPENAI/ChatGPT5-08-07-2025.mkd",
+        "ext": ".mkd",
+        "date": [
+          2025,
+          8,
+          7
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT_4.1_05-15-2025.txt",
+        "repo_path": "OPENAI/ChatGPT_4.1_05-15-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          5,
+          15
+        ],
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT_4o_04-25-2025.txt",
+        "repo_path": "OPENAI/ChatGPT_4o_04-25-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          4,
+          25
+        ],
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT_o3_o4-mini_04-16-2025",
+        "repo_path": "OPENAI/ChatGPT_o3_o4-mini_04-16-2025",
+        "ext": "",
+        "date": [
+          2025,
+          4,
+          16
+        ],
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "GPT-4.5_02-27-25.md",
+        "repo_path": "OPENAI/GPT-4.5_02-27-25.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          2,
+          27
+        ],
+        "version": [
+          25,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Codex_Desktop/GPT-6_Astra_Prompts.md",
+        "repo_path": "OPENAI/Codex_Desktop/GPT-6_Astra_Prompts.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          6,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Codex_Desktop/5.6-Sol_SystemPrompt.md",
+        "repo_path": "OPENAI/Codex_Desktop/5.6-Sol_SystemPrompt.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          5,
+          6
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "GPT-4o_Image_Gen_Postfill.txt",
+        "repo_path": "OPENAI/GPT-4o_Image_Gen_Postfill.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "ChatGPT_Personality_v2_Change.md",
+        "repo_path": "OPENAI/ChatGPT_Personality_v2_Change.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          2,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Codex.md",
+        "repo_path": "OPENAI/Codex.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "perplexity": [
+      {
+        "variant": "Perplexity_Deep_Research.txt",
+        "repo_path": "PERPLEXITY/Perplexity_Deep_Research.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "replit": [
+      {
+        "variant": "Replit_Initial_Code_Generation_Prompt.md",
+        "repo_path": "REPLIT/Replit_Initial_Code_Generation_Prompt.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      },
+      {
+        "variant": "Replit_Agent.md",
+        "repo_path": "REPLIT/Replit_Agent.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Replit_Functions.md",
+        "repo_path": "REPLIT/Replit_Functions.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": true
+      }
+    ],
+    "samedev": [
+      {
+        "variant": "Same_Dev.txt",
+        "repo_path": "SAMEDEV/Same_Dev.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "vercel-v0": [
+      {
+        "variant": "Vercel_v0.txt",
+        "repo_path": "VERCEL V0/Vercel_v0.txt",
+        "ext": ".txt",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      }
+    ],
+    "windsurf": [
+      {
+        "variant": "Windsurf_Prompt.md",
+        "repo_path": "WINDSURF/Windsurf_Prompt.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      },
+      {
+        "variant": "Windsurf_Tools.md",
+        "repo_path": "WINDSURF/Windsurf_Tools.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": true
+      }
+    ],
+    "xai": [
+      {
+        "variant": "GROK-4.1_Nov-17-2025.txt",
+        "repo_path": "XAI/GROK-4.1_Nov-17-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          11,
+          17
+        ],
+        "version": [
+          4,
+          1
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "date 2025-11-17"
+      },
+      {
+        "variant": "Grok-Code-Fast-1_Aug-26-2025.txt",
+        "repo_path": "XAI/Grok-Code-Fast-1_Aug-26-2025.txt",
+        "ext": ".txt",
+        "date": [
+          2025,
+          8,
+          26
+        ],
+        "version": [
+          1,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "GROK-4-NEW_Jul-13-2025",
+        "repo_path": "XAI/GROK-4-NEW_Jul-13-2025",
+        "ext": "",
+        "date": [
+          2025,
+          7,
+          13
+        ],
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Grok4-July-10-2025.md",
+        "repo_path": "XAI/Grok4-July-10-2025.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          7,
+          10
+        ],
+        "version": [
+          4,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Grok3_updated_07-08-2025.md",
+        "repo_path": "XAI/Grok3_updated_07-08-2025.md",
+        "ext": ".md",
+        "date": [
+          2025,
+          7,
+          8
+        ],
+        "version": [
+          3,
+          0
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "GROK-4.20.mkd",
+        "repo_path": "XAI/GROK-4.20.mkd",
+        "ext": ".mkd",
+        "date": null,
+        "version": [
+          4,
+          20
+        ],
+        "supplemental": false
+      },
+      {
+        "variant": "Grok3.md",
+        "repo_path": "XAI/Grok3.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          3,
+          0
+        ],
+        "supplemental": false
+      }
+    ],
+    "zai": [
+      {
+        "variant": "ZCode/Prompts.md",
+        "repo_path": "ZAI/ZCode/Prompts.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": false,
+        "latest": true,
+        "latest_reason": "only candidate"
+      },
+      {
+        "variant": "ZCode/Skills.md",
+        "repo_path": "ZAI/ZCode/Skills.md",
+        "ext": ".md",
+        "date": null,
+        "version": [
+          0,
+          0
+        ],
+        "supplemental": true
+      }
+    ]
+  }
+}
