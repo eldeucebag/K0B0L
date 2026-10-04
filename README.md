@@ -106,22 +106,29 @@ Notes:
 
 ## Chat
 
-`--chat` opens an interactive session with the small abliterated model. It is a
-workbench, not a stage: no run record, no target, no objective.
+The chat is the default: a bare `thinlizzy.py` opens the interactive session —
+a workbench, not a stage: no run record, no target, no objective. `--no-chat`
+(or `K0B0L_NO_CHAT=1`, for scripts and cron) runs the three-role loop instead,
+and `--cycle` / `--mode` / `--objective` always name a run explicitly.
 
 ```bash
-python3 thinlizzy.py --chat                          # attacker model, cwd as root
-python3 thinlizzy.py --chat --chat-root ~/work --chat-model qwen3:8b
+python3 thinlizzy.py                                  # the chat; attacker model, cwd as root
+python3 thinlizzy.py --chat-root ~/work --chat-model qwen3:8b
+python3 thinlizzy.py --no-chat                       # the loop, as the bare command used to
 ```
 
-The model gets seven file tools — `read_file`, `list_files`, `search_files`,
-`write_file`, `edit_file`, `run_script`, `ask_user_choice` — plus read-only
-info tools it cannot act through (`harness_help`, `list_models`, `list_modes`,
-`list_deployments`, `list_sessions`, `read_docs`). Their output is rendered
-**into the chat** rather than dumped to the shell: streamed prose, a panel per
-tool call, the result under it, so the transcript reads as one conversation.
-`/tools off|summary|full` controls how much of a result is shown; the model
-always receives all of it.
+The model gets nine file tools — `read_file`, `list_files`, `search_files`,
+`write_file`, `edit_file`, `run_script`, `ask_user_choice`, `remember`,
+`recall` — plus read-only info tools it cannot act through (`harness_help`,
+`list_models`, `list_modes`, `list_deployments`, `list_sessions`,
+`read_docs`). Their output is rendered **into the chat** rather than dumped
+to the shell: streamed prose, a panel per tool call, the result under it, so
+the transcript reads as one conversation. `/tools off|summary|full` controls
+how much of a result is shown; the model always receives all of it.
+
+`remember` and `recall` are the model's own long-term memory (see
+`docs/memory`): a fact one session writes to `~/.k0b0l-memory.sqlite` is
+recallable by any later session, under any model, with its provenance intact.
 
 There is no shell tool, and every path resolves against one root
 (`CHAT_ROOT`, default the working directory) — anything outside it is refused,

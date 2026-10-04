@@ -141,6 +141,10 @@ class ChatSession:
         #: Read-only harness answers (`harness_help`, `list_models`, ...), or
         #: None when the session is constructed without the app's context.
         self.info = info
+        #: Long-term, cross-model research memory (see :mod:`rt_harness.memory`).
+        #: Built lazily: the constructor must never fail on a locked or
+        #: read-only home directory, and a session that never asks costs none.
+        self._memory: Any = None
         #: MCP servers whose tools should be offered alongside the file tools.
         #: None (or an empty registry) simply means the model sees no
         #: `mcp__…` tools. See :mod:`rt_harness.mcp`.
@@ -168,6 +172,52 @@ class ChatSession:
 
     def uses_tools(self) -> bool:
         return self.config.tools
+
+    # -- long-term memory -------------------------------------------------
+    @property
+    def memory(self) -> Any:
+        """The cross-model research store, built on first use.
+
+        A missing or unreadable store degrades to None rather than raising:
+        the chat's value does not hinge on it, and a session that cannot
+        remember must still be able to talk.
+        """
+        if self._memory is None:
+            try:
+                from .memory import MemoryStore
+
+                self._memory = MemoryStore()
+            except Exception as exc:  # noqa: BLE001 - a locked home is not fatal
+                self.hooks.notice(f"long-term memory unavailable: {exc}")
+                self._memory = False
+        return self._memory or None
+
+    def remember(self, body: str, *, domain: str = "", importance: float = 0.5,
+                 source: str = "chat") -> bool:
+        """Write one memory with this session's provenance."""
+        store = self.memory
+        if store is None:
+            return False
+        store.remember(body, domain=domain, model=self.config.model,
+                       session=f"turn-{self.turns + 1}", source=source,
+                       importance=importance)
+        return True
+
+    def recall(self, query: str, *, domain: str = "", limit: int = 0) -> list[Any]:
+        """Read the store: the model's own recall half.
+
+        Self-memorization means the model decides when to look, so this is
+        the session-side read the ``recall`` tool lands on. Returns the raw
+        ``Memory`` rows (body, domain, model, when) so the model sees its
+        own provenance.
+        """
+        store = self.memory
+        if store is None:
+            return []
+        from .memory import DEFAULT_LIMIT
+
+        return store.recall(query, domain=domain,
+                            limit=limit or DEFAULT_LIMIT)
 
     # -- history ----------------------------------------------------------
     def reset(self) -> None:
@@ -216,6 +266,20 @@ class ChatSession:
                 parts.append(
                     "You have file tools" + extra + " available. Read a file before editing it."
                 )
+            # Self-memorization: the memory is the model's own, and so is the
+            # decision to use it. The instruction states the mechanic and the
+            # judgement calls, not a schedule -- nothing is recalled or
+            # written unless the model calls a tool.
+            parts.append(
+                "You have long-term memory across every session of this harness: "
+                "`remember(body, domain, importance)` writes a durable fact "
+                "(one clear sentence), and `recall(query, domain)` finds what "
+                "you or another model wrote before. Use them as you judge "
+                "best: remember what a future session would otherwise have to "
+                "rediscover, and recall when starting or resuming a research "
+                "task. Memories persist across models, domains and restarts; "
+                "each carries the model and date that wrote it."
+            )
         else:
             parts.append("You have no tools. Answer from the conversation alone.")
         return "\n\n".join(part for part in parts if part)

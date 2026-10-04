@@ -48,8 +48,8 @@ Operator commands (this chat)
 - /paste /clear /history /exit.
 
 CLI (shell, not the model)
+- python3 thinlizzy.py                      # the chat (this session; the default)
 - python3 thinlizzy.py --cycle --objective "..."   # the attack loop
-- python3 thinlizzy.py --chat                      # this session
 - python3 thinlizzy.py --list-modes / --list-families
 """
 

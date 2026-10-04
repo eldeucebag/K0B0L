@@ -55,14 +55,15 @@ is why the CLI only ever *replaces* fields it was handed.
 
 ## Flags
 
-`python3 thinlizzy.py --help` is the complete list. The chat flags are grouped
-under `chat` and mirror the env vars above:
+`python3 thinlizzy.py --help` is the complete list. The chat is the default
+(bare `thinlizzy.py` opens it; `--no-chat` or `K0B0L_NO_CHAT=1` runs the loop).
+The chat flags are grouped under `chat` and mirror the env vars above:
 
 ```
 --chat                --chat-model <name>   --chat-root <path>
 --chat-tool-output    --chat-protocol       --no-chat-tools
---no-soul             --soul-file <path>    --docs-dir <path>
---no-semantic
+--no-chat             --no-soul             --soul-file <path>
+--docs-dir <path>     --no-semantic
 --chat-plain          --chat-classic
 ```
 

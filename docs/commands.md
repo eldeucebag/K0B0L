@@ -42,14 +42,14 @@ objective.
 
 ## CLI equivalents
 
-Every chat command has a shell-side counterpart, and the CLI process that owns
-the run is the one you start with `--chat`:
+Every chat command has a shell-side counterpart, and the chat is what a bare
+`thinlizzy.py` opens (`--no-chat` or `K0B0L_NO_CHAT=1` runs the loop instead):
 
 ```bash
-python3 thinlizzy.py --chat                       # this session
-python3 thinlizzy.py --chat --no-soul             # without SOUL.md
+python3 thinlizzy.py                              # this session (the default)
+python3 thinlizzy.py --no-soul                    # without SOUL.md
 python3 thinlizzy.py --cycle --objective "..."    # the attack loop, unattended
 python3 thinlizzy.py --list-modes                 # modes and one-liners
 python3 thinlizzy.py --list-families              # deployment families
-python3 thinlizzy.py --help                       # every flag
+python3 thinlizzy.py --help                        # every flag
 ```

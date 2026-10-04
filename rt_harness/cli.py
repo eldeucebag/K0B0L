@@ -1,13 +1,20 @@
 """Command line entry point.
 
 Configuration is read from the environment first, so every existing invocation
-of the shell harness works unchanged; flags override it. Without ``--objective``
-the harness reads objectives from stdin, one per run, until EOF.
+of the shell harness works unchanged; flags override it.
+
+The chat is the default: a bare ``thinlizzy.py`` opens the interactive session,
+because the harness's primary use is working *with* a model, not only scoring
+it. The three-role loop still runs when it is asked for by name -- ``--cycle``
+with an ``--objective``, the single-pass ``--mode`` -- or explicitly restored
+as the default with ``--no-chat`` (or ``K0B0L_NO_CHAT=1``, for scripts and
+cron where a bare invocation must not take over a terminal).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -155,13 +162,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat = parser.add_argument_group(
         "chat",
-        "An interactive session with the small abliterated model, with file "
-        "tools that read and edit files under one root directory.",
+        "The interactive session (the default): a model with file tools that "
+        "read and edit files under one root directory.",
     )
     chat.add_argument(
         "--chat",
         action="store_true",
-        help="Start the interactive chat instead of running the three-role loop.",
+        help="Start the interactive chat. This is the default; the flag exists so --no-chat can be overridden by a script that always passes --chat.",
+    )
+    chat.add_argument(
+        "--no-chat",
+        action="store_true",
+        help="Do not open the chat; run the three-role loop (or print the target-model usage) as the bare command used to.",
     )
     chat.add_argument(
         "--chat-model",
@@ -561,7 +573,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Cached {len(written)} system prompts under {config.system_prompts_dir}")
         return 0
 
-    if args.chat:
+    # The chat is the default. It yields to an explicit --no-chat, to the
+    # K0B0L_NO_CHAT env var (scripts, cron, and the objective-reading stdin
+    # loop of the shell harness all predate the default and must keep
+    # working unchanged), and to any flag that names a run instead: asking
+    # for --cycle or a single-pass --mode is the operator saying what they
+    # want, and the chat must not swallow it.
+    wants_run = (
+        args.no_chat
+        or bool(os.environ.get("K0B0L_NO_CHAT", "").strip())
+        or args.cycle
+        or args.objective is not None
+        or args.mode is not None
+    )
+    if args.chat or not wants_run:
         # Before the target check on purpose: chatting with the attacker does
         # not involve a target model at all.
         from .textual_chat import run_textual

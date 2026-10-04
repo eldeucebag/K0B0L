@@ -433,6 +433,8 @@ class Workspace:
             "edit_file": self.edit_file,
             "run_script": self.run_script,
             "ask_user_choice": self.ask_user_choice,
+            "remember": self.remember,
+            "recall": self.recall,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -540,6 +542,82 @@ class Workspace:
             return ToolResult(False, "the operator cancelled the selection")
         return ToolResult(True, json.dumps(chosen))
 
+    def remember(
+        self,
+        body: str,
+        *,
+        domain: str = "",
+        importance: float = 0.5,
+    ) -> ToolResult:
+        """Write a durable note to the long-term research memory.
+
+        The model-facing half of the memory feature: a research session that
+        learns a fact writes it once, and every later session -- any model,
+        any workspace -- recalls it. Provenance (which model wrote it, when)
+        is stamped by the session, so the model cannot misattribute.
+        """
+        body = (body or "").strip()
+        if not body:
+            return ToolResult(False, "a memory needs a body: one clear sentence")
+        # The UI object is the ChatSession in the chat; it owns the store and
+        # the model name. Without one (a bare workspace in a test) refuse
+        # cleanly rather than writing unattributed rows.
+        session = getattr(self._ui, "memory", None) is not None
+        if not session:
+            return ToolResult(False, "no session is bound to this workspace")
+        try:
+            importance = max(0.0, min(1.0, float(importance)))
+        except (TypeError, ValueError):
+            importance = 0.5
+        # ``self._ui`` is the ChatSession (see chat.py): remember() carries
+        # the model name and turn provenance.
+        wrote = self._ui.remember(body, domain=domain, importance=importance,
+                                  source="model")
+        if not wrote:
+            return ToolResult(False, "the long-term memory store is unavailable")
+        return ToolResult(
+            True,
+            f"remembered ({domain or 'no domain'}): {body[:120]}",
+        )
+
+    def recall(
+        self,
+        query: str,
+        *,
+        domain: str = "",
+        limit: int = 0,
+    ) -> ToolResult:
+        """Search the model's own long-term memory.
+
+        The other half of self-memorization: the model asks for its own
+        earlier notes whenever it judges them relevant -- before answering a
+        research question, when a task resumes, when a fact feels half-known.
+        Rows come back with the model and date that wrote them, because a
+        memory the model cannot attribute is a memory it cannot trust.
+        """
+        if getattr(self._ui, "memory", None) is None:
+            return ToolResult(False, "no session is bound to this workspace")
+        try:
+            limit = max(0, min(int(limit), 32))
+        except (TypeError, ValueError):
+            limit = 0
+        rows = self._ui.recall(query or "", domain=domain, limit=limit)
+        if not rows:
+            return ToolResult(
+                True,
+                "no earlier memories matched; the store only holds what a "
+                "session chose to remember",
+            )
+        out = []
+        for row in rows:
+            import time as _time
+
+            stamp = _time.strftime("%Y-%m-%d", _time.localtime(row.created))
+            who = f" by {row.model}" if row.model else ""
+            scope = f" [{row.domain}]" if row.domain else ""
+            out.append(f"- {row.body}{scope} ({stamp}{who})")
+        return ToolResult(True, "\n".join(out))
+
 
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict:
     return {
@@ -645,6 +723,53 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["prompt", "options"],
+    ),
+    _schema(
+        "remember",
+        "Save a durable fact to long-term memory, shared across models and "
+        "sessions. One clear sentence; it will be recalled verbatim later.",
+        {
+            "body": {
+                "type": "string",
+                "description": "The fact, as one self-contained sentence",
+            },
+            "domain": {
+                "type": "string",
+                "description": "Optional scope tag, e.g. 'serving' or 'research'; "
+                "recalls can be narrowed to it",
+                "default": "",
+            },
+            "importance": {
+                "type": "number",
+                "description": "0.0-1.0; higher facts are recalled first",
+                "default": 0.5,
+            },
+        },
+        ["body"],
+    ),
+    _schema(
+        "recall",
+        "Search your own long-term memory: earlier facts you (or another "
+        "model in this harness) chose to remember. Call it when starting a "
+        "research task, resuming one, or when a fact feels half-known.",
+        {
+            "query": {
+                "type": "string",
+                "description": "Words to look for; natural language works. "
+                "Empty returns your most important recent notes.",
+            },
+            "domain": {
+                "type": "string",
+                "description": "Narrow to one scope tag, or empty for all",
+                "default": "",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum rows to return (0 = default 12)",
+                "default": 0,
+            },
+        },
+        [],
     ),
 ]
 

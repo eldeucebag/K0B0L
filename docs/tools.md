@@ -18,6 +18,8 @@ the reason the harness can hand tools to an abliterated model at all.
 | `edit_file(path, old, new, replace_all)` | Replace text in a file |
 | `run_script(path, args, interpreter, cwd, stdin, timeout)` | Run a script that already exists in the workspace |
 | `ask_user_choice(prompt, options, allow_multiple, default_selected)` | Ask the operator to pick from a list; a palette strip opens above the input bar |
+| `remember(body, domain, importance)` | Write one durable fact to the model's long-term memory (see `docs/memory`) |
+| `recall(query, domain, limit)` | Search that memory; results carry the model and date that wrote them |
 
 ## Info tools
 

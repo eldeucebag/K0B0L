@@ -88,5 +88,60 @@ rc, _out, err = run(["--cycle", "--objective", "probe"], TARGET_MODEL="")
 check("a cycle with no target model still fails cleanly", rc == 1, f"rc={rc}")
 check("...without a traceback", "Traceback" not in err, err[-400:])
 
+
+# -- chat is the default -----------------------------------------------------
+#
+# A bare invocation used to read objectives from stdin; it now opens the chat,
+# because that is the primary use of the harness. On a dead server the two
+# paths fail with different words, and that is the whole observable
+# difference from here: the chat probe says "<backend> is not reachable"
+# before any banner, the loop says "Server is not reachable" (and never a
+# banner). The target check passes on the loop path because a default target
+# exists, so the probe is what the loop reaches.
+
+CHAT_MARK = "llama.cpp is not reachable"
+LOOP_MARK = "Server is not reachable"
+
+
+def run_bare(argv, **overrides):
+    """A bare run with the live environment, output captured.
+
+    This suite's own stdin is not a TTY, so a bare call takes the plain front
+    end: the probe runs before anything is printed, and which probe ran is
+    the difference between "opens the chat" and "runs the loop".
+    """
+    saved = dict(os.environ)
+    os.environ.update({"API_URL": CLOSED, "SKIP_PULL": "1", **overrides})
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cli.main(argv)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    return rc, out.getvalue(), err.getvalue()
+
+
+rc, out, err = run_bare([])
+check("a bare invocation now opens the chat", CHAT_MARK in err, err[-200:])
+check("...and its server probe still fails honestly", rc == 1, f"rc={rc}")
+check("...without a traceback", "Traceback" not in err, err[-300:])
+
+rc, out, err = run_bare([], K0B0L_NO_CHAT="1")
+check("K0B0L_NO_CHAT=1 restores the loop", LOOP_MARK in err, err[-300:])
+check("...and does not open the chat", CHAT_MARK not in err, err[-200:])
+
+rc, out, err = run_bare(["--no-chat"])
+check("--no-chat also restores the loop", LOOP_MARK in err, err[-300:])
+check("...and does not open the chat", CHAT_MARK not in err, err[-200:])
+
+rc, out, err = run_bare(["--cycle", "--objective", "probe"])
+check("--cycle still wins over the chat default",
+      LOOP_MARK in err and CHAT_MARK not in err, (out + err)[-200:])
+
+rc, out, err = run_bare(["--chat"])
+check("--chat is still accepted and opens the chat", CHAT_MARK in err,
+      err[-200:])
+
 print(f"{OK} ok, {FAIL} failure(s)")
 sys.exit(1 if FAIL else 0)
