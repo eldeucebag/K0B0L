@@ -59,6 +59,7 @@ HELP = """commands
   /root [path]       show or change the workspace root
   /clear             forget the conversation (keeps the system message)
   /history           messages held, and how many tool calls have run
+  /compact           summarize the conversation and continue from the summary
   /exit              leave (ctrl-d works too)
 """
 
@@ -359,6 +360,8 @@ class ChatUI(ChatHooks):
                 f"{len(self.session.messages)} messages, {self.session.turns} turns, "
                 f"{self.session.tool_calls_made} tool calls"
             )
+        elif command == "/compact":
+            self.line(self.session.compress_command())
         elif command == "/skills":
             verb, _, rest = argument.partition(" ")
             verb, rest = verb.strip().lower(), rest.strip()

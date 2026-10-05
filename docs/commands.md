@@ -14,6 +14,7 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/soul` | Show the soul file this session loaded, and its path |
 | `/skills list\|enable\|disable <name>` | Manage skills: list, or pin/unpin one into every turn |
 | `/skills edit [name]` | Open the skills editor (see `docs/skills`); a name opens that skill directly |
+| `/compact` | Compress the conversation into one summary and continue from it — durable facts are written to the memory store, and earlier memories are recalled into the compacted context |
 | `/session save\|load\|list <name>` | Persist or resume a conversation |
 | `/run start [key=value ...] <objective>` | Spawn a cycle run |
 | `/run status\|tail [N]\|stop` | Watch or stop the current run |

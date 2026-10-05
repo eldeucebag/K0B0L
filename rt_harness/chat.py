@@ -115,6 +115,71 @@ def _is_malformed_tool_call(exc: BaseException) -> bool:
     return any(marker in text for marker in _MALFORMED_TOOL_CALL_MARKERS)
 
 
+#: The standing instruction for the dedicated compression turn. One job,
+#: one output shape: a compact narrative the next turn can read as its own
+#: history, with the durable facts in a scannable block the harness can
+#: mine for the memory store.
+COMPRESS_SYSTEM_PROMPT = (
+    "You are summarizing a conversation between an operator and an AI "
+    "assistant for the assistant's own continued use. Write a dense, "
+    "factual summary of everything that happened: the task, the "
+    "decisions and why, what was built or found, files and paths "
+    "touched, tool results worth knowing, open threads, and the next "
+    "step. Third person, no preamble, no headings except the ones asked "
+    "for. Then end with a section titled 'DURABLE FACTS' holding up to "
+    "eight one-line facts a future session must not lose -- each as a "
+    "single self-contained sentence. Do not ask questions. Do not add "
+    "anything that was not in the conversation."
+)
+
+#: The DURABLE FACTS section is mined for the memory store; anything past
+#: eight lines is summary, not durable.
+_FACTS_HEADING = "DURABLE FACTS"
+_MAX_FACTS = 8
+
+
+def _compress_transcript(source: list[dict[str, Any]]) -> str:
+    """Render the conversation as the compression turn's user message."""
+    lines = ["CONVERSATION TO SUMMARIZE:", ""]
+    for message in source:
+        role = str(message.get("role") or "user").upper()
+        body = str(message.get("content") or "")
+        text = message.get("content")
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            names = ", ".join(
+                str((call.get("function") or {}).get("name"))
+                for call in message["tool_calls"]
+            )
+            body = f"{body}\n[made tool calls: {names}]".strip()
+        elif isinstance(text, str) and "TOOL RESULT for" in text:
+            # The text protocol delivers results as user messages; label
+            # them so the summarizer knows what they are.
+            role = "TOOL"
+        lines.append(f"{role}: {body}")
+    return "\n\n".join(lines)
+
+
+def _extract_facts(summary: str) -> list[str]:
+    """Pull the DURABLE FACTS lines out of a compression summary."""
+    facts: list[str] = []
+    inside = False
+    for raw in summary.splitlines():
+        line = raw.strip()
+        if line.upper().startswith(_FACTS_HEADING):
+            inside = True
+            continue
+        if inside:
+            if not line:
+                continue
+            # A list bullet or a plain line; both are one fact.
+            body = line.lstrip("-*•0123456789. ").strip()
+            if body:
+                facts.append(body)
+            if len(facts) >= _MAX_FACTS:
+                break
+    return facts
+
+
 def _one_line(exc: BaseException, width: int = 130) -> str:
     """Collapse an exception to one bounded line for a chat notice."""
     text = " ".join(str(exc).split())
@@ -305,6 +370,132 @@ class ChatSession:
         dropped = len(self.messages) - len(tail) - 1
         self.messages = [head, *tail]
         self.hooks.notice(f"trimmed {dropped} older messages from the history")
+
+    # -- context compression ----------------------------------------------
+    def _compress_source(self) -> list[dict[str, Any]]:
+        """The messages a compression pass reads: everything but the system."""
+        return [m for m in self.messages if m.get("role") != "system"]
+
+    def _compress_probe(self, source: list[dict[str, Any]]) -> bool:
+        """Is there anything worth compressing? (Cheap, no generation.)"""
+        # The system message always holds one line; a fresh session holds
+        # nothing else. Tool plumbing (text-protocol result messages) is
+        # replayable history, not content -- but the fence it answers is in
+        # an assistant message, so the pair compresses together anyway.
+        return len(source) >= 2
+
+    def _compression_messages(self, source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The history handed to the summarizing turn.
+
+        The system message stays out: it is rebuilt from scratch by
+        :meth:`reset`, and asking the model to restate its own tool list
+        would spend the summary's budget on plumbing the harness already
+        reconstructs.
+        """
+        return [{"role": "system",
+                 "content": COMPRESS_SYSTEM_PROMPT},
+                {"role": "user",
+                 "content": _compress_transcript(source)}]
+
+    def compress(self, *, via_tool: bool = False) -> str:
+        """Summarize the conversation and replace it with the summary.
+
+        The memory-integrated rebuild of :meth:`_trim`: instead of dropping
+        the oldest messages wholesale, one dedicated summarization turn
+        condenses everything said so far into a digest the next turn reads
+        as ordinary conversation. The memory store runs in both directions
+        around the summary: durable facts inside it are written to the
+        store (so the summary is reconstructible by recall), and earlier
+        memories relevant to the work are recalled *into* the compressed
+        context (so a compacted session also recovers what earlier
+        sessions knew).
+
+        Returns a short operator-facing report line ("compressed 34
+        messages into 1 (memory: 4 facts, 3 recalled)"). Raises nothing:
+        a failed compression leaves the history untouched.
+        """
+        source = self._compress_source()
+        if not self._compress_probe(source):
+            return "nothing to compress yet"
+        try:
+            stream = self.client.chat_stream(
+                model=self.config.model,
+                messages=self._compression_messages(source),
+                options=self._options(),
+                tools=None,
+                think=self.config.thinking,
+                keep_alive=self.config.keep_alive,
+            )
+            parts: list[str] = []
+            for chunk in stream:
+                if "choices" in chunk:
+                    delta = (chunk["choices"][0].get("delta") or {}) if chunk["choices"] else {}
+                    parts.append(delta.get("content", "") or "")
+                else:
+                    message = chunk.get("message") or {}
+                    if isinstance(message.get("content"), str):
+                        parts.append(message["content"])
+            summary = "".join(parts).strip()
+        except OllamaError as exc:
+            self.hooks.notice(f"compression failed, history untouched: {exc}")
+            return ""
+        if not summary:
+            self.hooks.notice("compression produced nothing; history untouched")
+            return ""
+        # Recall runs before the new facts are written, so the block holds
+        # what *earlier* sessions and turns knew -- the summary already
+        # carries this conversation's own facts in its DURABLE FACTS tail.
+        store = self.memory
+        recalled = 0
+        recall_note = ""
+        if store is not None:
+            block = store.recall_block(summary[:400])
+            if block:
+                recall_note = "\n\n" + block
+                recalled = len(block.splitlines()) - 1
+        # The durable facts go to the store: the summary is a *lossy* view of
+        # the conversation, and a later recall must be able to rebuild more
+        # than the summary says. Facts written here carry source="compress"
+        # so the provenance stays honest.
+        facts = _extract_facts(summary)
+        for body in facts:
+            self.remember(body, domain="session", importance=0.6,
+                          source="compress")
+        self.reset()
+        tool_note = ""
+        if via_tool:
+            # The assistant message carrying the compress_context call was
+            # just folded into the summary, but its result arrives right
+            # after this one. Saying so here keeps the model from reading
+            # that result as an orphan and re-issuing the call.
+            tool_note = (
+                "\n\nYour compress_context tool call just completed "
+                "successfully; its confirmation arrives as the next "
+                "message. Do not call it again."
+            )
+        self.messages.append({
+            "role": "user",
+            "content": (
+                f"CONTEXT COMPRESSED. The conversation so far, summarized "
+                f"in full:\n\n{summary}"
+                f"{recall_note}{tool_note}\n\n"
+                "Treat this as the entire prior conversation. Continue "
+                "from it naturally; do not mention the compression."
+            ),
+        })
+        report = (f"compressed {len(source)} messages into 1 "
+                  f"({len(summary)} chars; memory: {len(facts)} written, "
+                  f"{recalled} recalled)")
+        self.hooks.notice(report)
+        return report
+
+    def compress_command(self) -> str:
+        """The /compact entry point: compress or explain why not."""
+        source = self._compress_source()
+        if not self._compress_probe(source):
+            return ("nothing to compress yet: the conversation is still "
+                    "the system message plus your first exchange")
+        return self.compress() or "compression failed; the history is untouched"
 
     # -- one assistant turn ----------------------------------------------
     def _options(self) -> dict[str, Any]:

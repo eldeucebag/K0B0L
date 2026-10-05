@@ -437,6 +437,7 @@ class Workspace:
             "recall": self.recall,
             "connect_memories": self.connect_memories,
             "expand_memory": self.expand_memory,
+            "compress_context": self.compress_context,
             "load_skill": self.load_skill,
         }
         handler = handlers.get(name)
@@ -702,6 +703,36 @@ class Workspace:
             out.append(f"- #{mem.id} {mem.body}{scope} ({stamp}{who})")
         return ToolResult(True, "\n".join(out))
 
+    def compress_context(self) -> ToolResult:
+        """Compress the whole conversation into a summary (see /compact).
+
+        The model-facing half of context compression: a session whose
+        history is running long can fold everything so far into one dense
+        summary, write the durable facts to the memory store, and recall
+        earlier memories into the compacted context. The next turn reads
+        the summary as its entire prior conversation.
+
+        Call it when the history is heavy with tool traffic or many
+        exchanges, or when told to. The result confirms what happened; the
+        compressed context itself arrives as the next message.
+        """
+        session = getattr(self._ui, "compress", None)
+        if not callable(session):
+            return ToolResult(False, "no session is bound to this workspace")
+        source_count = len([
+            m for m in self._ui.messages
+            if getattr(m, "get", lambda *_: None)("role") != "system"
+        ])
+        if source_count < 2:
+            return ToolResult(True, "nothing to compress yet; the "
+                              "conversation is too short to need it")
+        report = self._ui.compress(via_tool=True)
+        if not report or report.startswith("nothing"):
+            return ToolResult(True, report or "nothing to compress yet")
+        return ToolResult(True, report + ". The compressed context "
+                          "arrives as the next message; continue from it "
+                          "without calling this again.")
+
     def load_skill(self, name: str) -> ToolResult:
         """Load one skill's full body on demand (progressive disclosure).
 
@@ -940,6 +971,17 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["memory_id"],
+    ),
+    _schema(
+        "compress_context",
+        "Fold this conversation's history into one dense summary and "
+        "continue from it: durable facts go to the long-term memory, and "
+        "earlier memories are recalled into the compacted context. Call "
+        "when the history is long or heavy with tool traffic, or when "
+        "told to compact. The result confirms; the compressed context "
+        "arrives as the next message.",
+        {},
+        [],
     ),
     _schema(
         "load_skill",

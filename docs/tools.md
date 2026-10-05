@@ -22,6 +22,7 @@ the reason the harness can hand tools to an abliterated model at all.
 | `recall(query, domain, limit)` | Search that memory; results carry ids and the model and date that wrote them |
 | `connect_memories(from_id, to_id, why)` | Link two memories as one subject — an explicit graph edge |
 | `expand_memory(memory_id, hops, limit)` | Walk the memory graph from one memory, nearest first |
+| `compress_context()` | Fold this conversation into a summary and continue from it — the model's half of `/compact` |
 | `load_skill(name)` | Open one installed skill's full procedure, prerequisites first (see `docs/skills`) |
 
 ## Info tools
@@ -57,6 +58,30 @@ enough that refusing it would just cost turns.
 | `off` | Nothing but the model's prose |
 | `summary` (default) | One line per call: tool, key argument, result size |
 | `full` | Arguments and result text |
+
+## Context compression: `/compact` and `compress_context`
+
+Long conversations cost context. `/compact` (the operator) and the model's
+`compress_context()` tool fold the whole conversation into one dense
+summary, written by a dedicated summarization turn under the session's own
+model:
+
+- **The summary becomes the history.** The next turn reads it as its
+  entire prior conversation (`CONTEXT COMPRESSED. …`); nothing else
+  survives except the rebuilt system message.
+- **Durable facts are written to the memory store** before the history is
+  dropped. The summarizer ends with a `DURABLE FACTS` block; each line is
+  written with `source="compress"`, so a later session can `recall` what
+  this conversation established.
+- **Earlier memories are recalled into the compacted context.** The store
+  is searched with the summary itself as the query, and matching notes
+  from earlier sessions ride the compressed history — a compacted session
+  also recovers what came before it.
+- **Failure leaves the history untouched.** A refused or failed
+  compression turn changes nothing.
+
+When to use it: `/compact` when you see the history growing heavy;
+`compress_context` is the model's own version of the same judgement.
 
 ## Interactive user choices
 

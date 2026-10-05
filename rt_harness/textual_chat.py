@@ -330,8 +330,8 @@ class SuggestorForChat(Suggester):
 
 _COMMANDS = ["/help", "/tools", "/think", "/read", "/run", "/paste",
              "/model", "/models", "/target", "/root", "/clear", "/history",
-             "/exit", "/theme", "/semantic", "/skills", "/session", "/docs",
-             "/soul"]
+             "/compact", "/exit", "/theme", "/semantic", "/skills",
+             "/session", "/docs", "/soul"]
 
 #: One-line descriptions for the Ctrl-P command dispatch. Filled by texting.
 COMMAND_INFO = {
@@ -349,6 +349,7 @@ COMMAND_INFO = {
     "/root": "change the workspace root",
     "/clear": "clear the conversation",
     "/history": "show message counts",
+    "/compact": "compress the conversation into a summary and continue",
     "/exit": "leave the chat",
     "/theme": "switch the UI theme",
     "/semantic": "colour data in the transcript",

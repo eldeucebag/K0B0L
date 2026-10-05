@@ -131,9 +131,10 @@ python3 thinlizzy.py --chat-root ~/work --chat-model qwen3:8b
 python3 thinlizzy.py --no-chat                       # the loop, as the bare command used to
 ```
 
-The model gets twelve file tools — `read_file`, `list_files`, `search_files`,
+The model gets thirteen file tools — `read_file`, `list_files`, `search_files`,
 `write_file`, `edit_file`, `run_script`, `ask_user_choice`, `remember`,
-`recall`, `connect_memories`, `expand_memory`, `load_skill` — plus
+`recall`, `connect_memories`, `expand_memory`, `compress_context`,
+`load_skill` — plus
 read-only info tools it cannot act through (`harness_help`,
 `list_models`, `list_modes`, `list_deployments`, `list_sessions`,
 `read_docs`). Their output is rendered **into the chat** rather than dumped
@@ -174,7 +175,7 @@ fenced `tool` block protocol instead for checkpoints whose template has none.
 
 Commands: `/help`, `/tools`, `/think`, `/read`, `/docs`, `/soul`, `/run`,
 `/paste`, `/model`, `/target`, `/root`, `/theme`, `/semantic`, `/skills`,
-`/session`, `/clear`, `/history`, `/exit`.
+`/session`, `/clear`, `/compact`, `/history`, `/exit`.
 
 The Textual front end adds a menu bar (`Session`, `Run`, `View`, `Help`) and
 keyboard coverage for all of it: **esc** opens the current menu and hands it the
