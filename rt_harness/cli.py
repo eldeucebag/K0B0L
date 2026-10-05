@@ -609,12 +609,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         client.version()
     except OllamaError as exc:
-        print(
-            f"Error: Server is not reachable at {config.api_url}.",
-            file=sys.stderr,
-        )
-        print(str(exc), file=sys.stderr)
-        return 1
+        # A dead localhost endpoint usually means the models are served
+        # remotely; ask once (interactive TTYs) and retry before failing.
+        from .tui import ask_endpoint_on_failure
+
+        retry_url = ask_endpoint_on_failure(config, running=True)
+        if retry_url != config.api_url:
+            config.ollama_url = retry_url
+            client = make_client(config.api_url)
+        try:
+            client.version()
+        except OllamaError:
+            print(
+                f"Error: Server is not reachable at {config.api_url}.",
+                file=sys.stderr,
+            )
+            print(str(exc), file=sys.stderr)
+            return 1
 
     base_prompt = ""
     if config.base_prompt_file:

@@ -2243,14 +2243,21 @@ class TextualChatUI(ChatUI):
 
 def run_textual(config: Any) -> int | None:
     """Entry point for the Textual chat; ``None`` when it cannot run here."""
-    from .tui import _pick_client
+    from .tui import _pick_client, ask_endpoint_on_failure
 
     client = _pick_client(config)
     try:
         client.version()
     except OllamaError as exc:
-        print(f"Ollama is not reachable at {config.ollama_url}: {exc}")
-        return 1
+        retry_url = ask_endpoint_on_failure(config, running=True)
+        if retry_url != config.api_url:
+            config.ollama_url = retry_url
+            client = _pick_client(config)
+        try:
+            client.version()
+        except OllamaError:
+            print(f"Ollama is not reachable at {config.ollama_url}: {exc}")
+            return 1
     chat = config.chat
     if not Path(chat.root).is_dir():
         print(f"chat workspace root is not a directory: {chat.root}")

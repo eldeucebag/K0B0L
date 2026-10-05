@@ -64,6 +64,53 @@ HELP = """commands
 """
 
 
+def ask_endpoint_on_failure(config: "Config", *, running: bool) -> str:
+    """When localhost is dead, the operator probably meant a remote API.
+
+    Every chat/loop entry point probes the endpoint before doing anything
+    else. A connection failure on a localhost address is usually not a
+    broken harness but a different intent: the model is served somewhere
+    else (a LAN box, a rented GPU, a remote /v1 endpoint). Rather than
+    exiting, ask once -- interactive TTYs only -- and retry the probe with
+    whatever comes back.
+
+    Returns the URL to use (the original when the operator declines or no
+    TTY is available). The answer is echoed back with the API_URL hint so
+    the next start does not have to ask again.
+    """
+    import sys
+    from urllib.parse import urlparse
+
+    if not running or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return config.api_url
+    host = urlparse(config.api_url).hostname or ""
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return config.api_url  # already pointed elsewhere; leave it alone
+    try:
+        print(
+            f"\nThe model endpoint at {config.api_url} is not reachable.\n"
+            "If your models are served remotely, enter that endpoint now\n"
+            "(e.g. http://192.168.1.50:11434 or https://host.example/v1);\n"
+            "press Enter to give up.",
+            file=sys.stderr,
+        )
+        answer = input("endpoint url (empty = exit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return config.api_url
+    if not answer:
+        return config.api_url
+    # Accept a bare host:port the way an operator types it. Whether the
+    # native or OpenAI client is picked follows the same rule as always:
+    # _pick_client decides by the /v1 suffix, not by the host.
+    if "://" not in answer:
+        answer = "http://" + answer
+    print(
+        f"using {answer} (set API_URL={answer} to make it permanent)",
+        file=sys.stderr,
+    )
+    return answer
+
+
 def _pick_client(config: Config) -> Any:
     """Ollama-shaped endpoints get the native client; /v1 endpoints get the
     OpenAI chat-completions one. Authorization (if the endpoint record carries
@@ -806,11 +853,20 @@ def run_chat(config: Config, *, force_plain: bool = False) -> int:
         # Probe only: any successful answer proves the endpoint is up.
         client.version()
     except OllamaError as exc:
-        print(
-            f"{client.backend} is not reachable at {config.api_url}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+        # A dead localhost endpoint usually means the models are served
+        # remotely; ask once (interactive TTYs) and retry before failing.
+        retry_url = ask_endpoint_on_failure(config, running=True)
+        if retry_url != config.api_url:
+            config.ollama_url = retry_url
+            client = _pick_client(config)
+        try:
+            client.version()
+        except OllamaError:
+            print(
+                f"{client.backend} is not reachable at {config.api_url}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
     console = None
     # prompt_toolkit and rich both want a terminal. Piped input gets the plain
