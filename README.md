@@ -1,18 +1,24 @@
 # K0B0L
 
-A three-role red-team loop for local Ollama models. It takes an artifact (the
-"base prompt"), plans an attack against it, rewrites the artifact into candidate
-test prompts, and runs those candidates against a target model. Every stage's
-telemetry is logged so a run can be audited after the fact.
+A general-purpose local research harness with a red-team core. Two faces,
+one process: an interactive AI chat that can read, write, search and run
+things inside a confined workspace — and, with `--no-chat`, a three-role
+adversarial loop that takes an artifact (the "base prompt"), plans an
+attack against it, rewrites it into candidate test prompts, and runs those
+candidates against a target model, logging every stage's telemetry so a
+run can be audited after the fact.
 
-The point of this repository is the **shape of the loop**, not the models in it.
-Roles, order, and budgets are configuration.
+The chat is the harness's primary face; the red-team loop is the
+specialized mode. Roles, order, and budgets are configuration, so the
+loop measures any local model you point it at — and the chat gives the
+same models a workspace, tools, skills, and long-term memory to work in.
 
 ## Running it
 
 ```bash
-./thinlizzy.py --mode plan --objective "..."           # equivalent to:
-python3 -m rt_harness --mode plan --objective "..."
+python3 thinlizzy.py                                # the chat (default)
+python3 thinlizzy.py --no-chat --mode plan --objective "..."
+python3 -m rt_harness --mode plan --objective "..."  # same thing
 ```
 
 `thinlizzy.sh` is the original shell implementation. It still works and still
@@ -27,15 +33,23 @@ rt_harness/
   cli.py          argument parsing, deployment resolution, config printout
   config.py       RoleSpec / Config, env contract, budget precedence
   client.py       Ollama HTTP client (stdlib urllib, non-streaming)
-  prompts.py      one builder per stage; all prompt text lives here
+  prompts.py      one builder per stage; all loop prompt text lives here
   pipeline.py     RunContext, Stage classes, the ordered loop
   analysis.py     reasoning stripping, telemetry, truncation warnings
   store.py        JSONL run records and per-stage telemetry files
   deployment.py   CL4R1T4S stock system prompts for a named model family
-  chat.py         interactive chat engine: history, streaming, the tool loop
+  chat.py         chat engine: history, streaming, the tool loop, triggers
   tools.py        the confined file workspace the chat's tools act on
-  tui.py          chat front ends (rich, or plain line mode)
+  memory.py       the model's long-term memory store (SQLite FTS5 + graph)
+  skills.py       SKILL.md parsing, discovery, the requires-chain
+  soul.py         SOUL.md: the standing identity block
+  themes.py       fourteen themes, retro palettes, state migration
+  tui.py          plain chat front end and shared command dispatch
+  textual_chat.py the Textual front end: transcript, folds, pickers,
+                  command palette, skills editor
   data/           pinned CL4R1T4S catalog (generated, see tools/)
+skills/           shipped skills (research, storytelling, ...)
+docs/             capability docs, written for the model as much as for you
 tools/gen_catalog.py   regenerates the catalog from the upstream repository
 tests/                 chat subsystem suite (see tests/README.md)
 ```
@@ -117,9 +131,10 @@ python3 thinlizzy.py --chat-root ~/work --chat-model qwen3:8b
 python3 thinlizzy.py --no-chat                       # the loop, as the bare command used to
 ```
 
-The model gets nine file tools — `read_file`, `list_files`, `search_files`,
+The model gets twelve file tools — `read_file`, `list_files`, `search_files`,
 `write_file`, `edit_file`, `run_script`, `ask_user_choice`, `remember`,
-`recall` — plus read-only info tools it cannot act through (`harness_help`,
+`recall`, `connect_memories`, `expand_memory`, `load_skill` — plus
+read-only info tools it cannot act through (`harness_help`,
 `list_models`, `list_modes`, `list_deployments`, `list_sessions`,
 `read_docs`). Their output is rendered **into the chat** rather than dumped
 to the shell: streamed prose, a panel per tool call, the result under it, so
@@ -129,6 +144,17 @@ how much of a result is shown; the model always receives all of it.
 `remember` and `recall` are the model's own long-term memory (see
 `docs/memory`): a fact one session writes to `~/.k0b0l-memory.sqlite` is
 recallable by any later session, under any model, with its provenance intact.
+`connect_memories` and `expand_memory` work that memory as a graph — the
+model links facts it judges related and walks the neighbourhood of any
+recalled fact.
+
+`load_skill` is the on-demand half of the **skills system** (see
+`docs/skills`): every installed skill contributes one index line to the
+system message, and the model opens a full procedure when it needs one.
+Skills declare trigger keywords (a matching turn rides the whole body) and
+may declare `requires:` prerequisites, which load first as a chain. Skills
+live in plain `SKILL.md` files under the workspace `skills/` directory or
+`~/.k0b0l-skills/` — editable from inside the chat with `/skills edit`.
 
 There is no shell tool, and every path resolves against one root
 (`CHAT_ROOT`, default the working directory) — anything outside it is refused,
