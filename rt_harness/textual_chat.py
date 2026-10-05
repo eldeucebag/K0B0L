@@ -1030,6 +1030,7 @@ class SkillsEditor(ModalScreen[str | None]):
         "description: One line saying when this skill applies.\n"
         "trigger:\n"
         "  keywords: []\n"
+        "requires: []\n"
         "---\n\n"
         "# My Skill\n\n"
         "1. First step of the procedure.\n"

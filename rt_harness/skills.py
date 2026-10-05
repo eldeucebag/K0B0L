@@ -81,13 +81,22 @@ class Skill:
     description: str = ""
     keywords: tuple[str, ...] = field(default_factory=tuple)
     resources: tuple[Path, ...] = field(default_factory=tuple)
+    #: Skills this one builds on, by name (the graph edges). An edge is a
+    #: claim about procedure order -- "validation builds on safe-changes" --
+    #: kept in the frontmatter so it travels with the skill and any editor
+    #: that edits the file edits the graph.
+    requires: tuple[str, ...] = field(default_factory=tuple)
 
     def index_line(self) -> str:
         """The one line the system message carries until the skill loads."""
         label = self.name or self.path.stem
         if self.description:
-            return f"- {label}: {self.description}"
-        return f"- {label}"
+            line = f"- {label}: {self.description}"
+        else:
+            line = f"- {label}"
+        if self.requires:
+            line += f" (requires {', '.join(self.requires)})"
+        return line
 
     def matches(self, text: str) -> bool:
         """Do this skill's trigger keywords appear in ``text``?"""
@@ -134,6 +143,13 @@ def _load_skill_md(path: Path) -> Skill | None:
         keywords = tuple(str(word).strip() for word in raw if str(word).strip())
     elif isinstance(trigger, list):
         keywords = tuple(str(word).strip() for word in trigger if str(word).strip())
+    requires: tuple[str, ...] = ()
+    raw_requires = meta.get("requires") or ()
+    if isinstance(raw_requires, str):
+        raw_requires = [raw_requires]
+    if isinstance(raw_requires, (list, tuple)):
+        requires = tuple(str(name).strip() for name in raw_requires
+                         if str(name).strip())
     resources = tuple(
         sorted(p for p in path.parent.iterdir()
                if p.is_file() and p.name != "SKILL.md")
@@ -145,6 +161,7 @@ def _load_skill_md(path: Path) -> Skill | None:
         description=description,
         keywords=keywords,
         resources=resources,
+        requires=requires,
     )
 
 
@@ -220,3 +237,39 @@ def read_skill(skills: Iterable[Skill], name: str) -> Skill | None:
         if skill.path.parent.name.lower() == lowered:
             return skill
     return None
+
+
+def resolve_chain(skills: Iterable[Skill], name: str,
+                  loaded: set[str] | None = None) -> list[Skill]:
+    """One skill plus its un-met requires, in dependency order, cycles cut.
+
+    The graph walk behind both load_skill and trigger cascades: the named
+    skill's prerequisites load *before* it (a procedure that builds on
+    another reads the foundation first), each prerequisite expanded the
+    same way. A cycle -- a requires b requires a -- is a broken skill, not
+    a hang: the second visit is skipped, and the chain still returns what
+    it could resolve.
+
+    Missing names are skipped silently here: the caller knows what it asked
+    for and reports the edges it could not follow better than a list of
+    strings could.
+    """
+    pool = list(skills)
+    loaded = loaded if loaded is not None else set()
+    out: list[Skill] = []
+
+    def walk(skill: Skill) -> None:
+        key = (skill.name or skill.path.stem).lower()
+        if key in loaded:
+            return
+        loaded.add(key)
+        for needed in skill.requires:
+            found = read_skill(pool, needed)
+            if found is not None:
+                walk(found)
+        out.append(skill)
+
+    target = read_skill(pool, name)
+    if target is not None:
+        walk(target)
+    return out

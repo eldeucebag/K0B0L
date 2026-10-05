@@ -13,7 +13,14 @@ sides are tool calls the model makes when it judges them worthwhile:
 | Tool | Does |
 | --- | --- |
 | `remember(body, domain, importance)` | Write one durable fact, one clear sentence |
-| `recall(query, domain, limit)` | Find what was written before, with provenance |
+| `recall(query, domain, limit)` | Find what was written before, with ids and provenance |
+| `connect_memories(from_id, to_id, why)` | Link two memories as one subject — the model's own edge |
+| `expand_memory(memory_id, hops, limit)` | Hop-recall: the facts connected to one memory, nearest first |
+
+`recall` results carry their ids (`#42 ...`) — the handles the graph tools
+take. `expand_memory` is the "what else do I know around this?" walk:
+recall finds the entry point, the graph expands the thought. Explicit
+`connect_memories` edges outrank derived ones and survive rewording.
 
 `recall` with an empty query returns the most important recent notes. Results
 come back as lines carrying their provenance — `- The PrismML router evicts a model... [serving] (2026-10-04 by Gemma-4-E4B-...)` — because a memory the model cannot

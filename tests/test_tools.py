@@ -60,8 +60,8 @@ def raises(label, fn):
 
 # -- schemas ---------------------------------------------------------------
 names = sorted(s["function"]["name"] for s in TOOL_SCHEMAS)
-check("schemas expose exactly the ten file tools",
-      names == ["ask_user_choice", "edit_file", "list_files", "load_skill", "read_file", "recall", "remember", "run_script", "search_files", "write_file"], str(names))
+check("schemas expose exactly the twelve file tools",
+      names == ["ask_user_choice", "connect_memories", "edit_file", "expand_memory", "list_files", "load_skill", "read_file", "recall", "remember", "run_script", "search_files", "write_file"], str(names))
 check("TOOL_NAMES matches the schemas", tuple(names) == tuple(sorted(TOOL_NAMES)))
 check("no shell/exec tool exists", not any("shell" in n or "exec" in n or "bash" in n for n in names))
 check("verbosity levels", TOOL_VERBOSITY == ("off", "summary", "full"))

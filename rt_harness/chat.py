@@ -538,15 +538,30 @@ class ChatSession:
             # operator's window into a doctrine firing; the message is a
             # system note so a later /clear cannot strip it from the model's
             # account of how it knew.
-            from .skills import triggered_skills
+            from .skills import resolve_chain, triggered_skills
 
+            seen_triggered: set[str] = set()
             all_skills = getattr(self.hooks, "_skills_all", lambda: [])()
             for skill in triggered_skills(all_skills, text):
-                self.hooks.notice(f"skill triggered: {skill.name}")
-                self.messages.append(
-                    {"role": "system",
-                     "content": f"Skill {skill.name} applies this turn:\n\n{skill.body}"}
-                )
+                # A trigger cascades: the skill arrives with its un-met
+                # prerequisites ahead of it, in dependency order, so a
+                # doctrine fires as a connected whole. Prerequisites already
+                # active this turn are not repeated.
+                for part in resolve_chain(all_skills, skill.name):
+                    key = part.name.lower()
+                    if key not in seen_triggered:
+                        seen_triggered.add(key)
+                        if part.name != skill.name:
+                            self.hooks.notice(
+                                f"skill triggered: {skill.name} "
+                                f"(brought {part.name})"
+                            )
+                        else:
+                            self.hooks.notice(f"skill triggered: {part.name}")
+                        self.messages.append(
+                            {"role": "system",
+                             "content": f"Skill {part.name} applies this turn:\n\n{part.body}"}
+                        )
         self._trim()
         final = ""
         tool_call_retry_used = False

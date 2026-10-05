@@ -28,6 +28,7 @@ name: tdd
 description: Test-driven development workflow.
 trigger:
   keywords: ["tdd", "write tests"]
+requires: [safe-changes]
 ---
 
 # Test-Driven Development
@@ -37,9 +38,30 @@ trigger:
 ...
 ```
 
-`name` and `description` are the required frontmatter; `trigger` is
-optional. A bare `.md` file (the old format) still works — heading title,
-no frontmatter, no trigger.
+`name` and `description` are the required frontmatter; `trigger` and
+`requires` are optional. A bare `.md` file (the old format) still works —
+heading title, no frontmatter, no trigger.
+
+## The skills graph: `requires`
+
+Skills connect to each other through `requires: [names]` — the edges live
+in the frontmatter, so they travel with the skill and any editor that
+edits the file edits the graph. What the harness does with them:
+
+- **`load_skill` pulls the chain**: loading a skill returns its un-met
+  prerequisites first (`[prerequisite: name]` headers), then the skill —
+  one call loads the connected whole, and unresolvable names are named in
+  the result rather than silently dropped.
+- **Triggers cascade**: a keyword hit activates the skill *and* its
+  prerequisites, in dependency order, each visible in the transcript.
+- **The index shows the shape**: `- validation: ... (requires safe-changes)`
+  — the model sees dependencies before it loads anything.
+- **Cycles are cut, not followed**: `a` requiring `b` requiring `a` loads
+  each once; the second visit is skipped.
+
+There is no separate graph editor by design: the edges are frontmatter,
+the `/skills edit` TextArea already edits them, and a side database would
+break the portability the format exists to protect.
 
 ## Progressive disclosure
 

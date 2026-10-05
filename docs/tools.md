@@ -19,8 +19,10 @@ the reason the harness can hand tools to an abliterated model at all.
 | `run_script(path, args, interpreter, cwd, stdin, timeout)` | Run a script that already exists in the workspace |
 | `ask_user_choice(prompt, options, allow_multiple, default_selected)` | Ask the operator to pick from a list; a palette strip opens above the input bar |
 | `remember(body, domain, importance)` | Write one durable fact to the model's long-term memory (see `docs/memory`) |
-| `recall(query, domain, limit)` | Search that memory; results carry the model and date that wrote them |
-| `load_skill(name)` | Open one installed skill's full procedure on demand (see `docs/skills`) |
+| `recall(query, domain, limit)` | Search that memory; results carry ids and the model and date that wrote them |
+| `connect_memories(from_id, to_id, why)` | Link two memories as one subject — an explicit graph edge |
+| `expand_memory(memory_id, hops, limit)` | Walk the memory graph from one memory, nearest first |
+| `load_skill(name)` | Open one installed skill's full procedure, prerequisites first (see `docs/skills`) |
 
 ## Info tools
 

@@ -435,6 +435,8 @@ class Workspace:
             "ask_user_choice": self.ask_user_choice,
             "remember": self.remember,
             "recall": self.recall,
+            "connect_memories": self.connect_memories,
+            "expand_memory": self.expand_memory,
             "load_skill": self.load_skill,
         }
         handler = handlers.get(name)
@@ -616,7 +618,88 @@ class Workspace:
             stamp = _time.strftime("%Y-%m-%d", _time.localtime(row.created))
             who = f" by {row.model}" if row.model else ""
             scope = f" [{row.domain}]" if row.domain else ""
-            out.append(f"- {row.body}{scope} ({stamp}{who})")
+            # The id is the handle the graph tools take: connect_memories and
+            # expand_memory work on what recall returned, so every row
+            # carries its id.
+            out.append(f"- #{row.id} {row.body}{scope} ({stamp}{who})")
+        return ToolResult(True, "\n".join(out))
+
+    def connect_memories(self, from_id: int, to_id: int, *,
+                         why: str = "") -> ToolResult:
+        """Record the model's own judgement that two facts belong together.
+
+        An explicit edge outranks every derived one in hop-recall and
+        survives later rewording of both bodies. ``why`` is optional
+        provenance, kept in the edge's kind so the claim itself is
+        inspectable.
+        """
+        store = getattr(self._ui, "memory", None)
+        if store is None:
+            return ToolResult(False, "no session is bound to this workspace")
+        try:
+            from_id, to_id = int(from_id), int(to_id)
+        except (TypeError, ValueError):
+            return ToolResult(False, "from_id and to_id must be memory ids "
+                              "(the #N in recall results)")
+        if from_id == to_id:
+            return ToolResult(False, "a memory cannot be linked to itself")
+        bodies = store._db.execute(
+            "SELECT id FROM memories WHERE id IN (?, ?)", (from_id, to_id)
+        ).fetchall()
+        if len(bodies) != 2:
+            found = {int(b["id"]) for b in bodies}
+            missing = [i for i in (from_id, to_id) if i not in found]
+            return ToolResult(
+                False,
+                f"no memory with id {missing[0]} -- ids come from recall "
+                "results, and forget() may have removed it",
+            )
+        kind = (why or "related").strip()[:40] or "related"
+        store.connect(from_id, to_id, kind=kind, weight=0.9, origin="explicit")
+        return ToolResult(True, f"linked #{from_id} <-> #{to_id} ({kind})")
+
+    def expand_memory(self, memory_id: int, *, hops: int = 1,
+                      limit: int = 8) -> ToolResult:
+        """Hop-recall: the facts connected to one memory, nearest first.
+
+        The graph walk that answers "what else do I know around this?":
+        recall finds the entry point, this expands the thought. Neighbours
+        rank by edge weight (explicit links first), then importance, then
+        recency.
+        """
+        store = getattr(self._ui, "memory", None)
+        if store is None:
+            return ToolResult(False, "no session is bound to this workspace")
+        try:
+            memory_id = int(memory_id)
+        except (TypeError, ValueError):
+            return ToolResult(False, "memory_id must be a memory id (the #N "
+                              "in recall results)")
+        row = store._db.execute(
+            "SELECT body FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            return ToolResult(False, f"no memory with id {memory_id}")
+        try:
+            hops = max(1, min(int(hops), 2))
+        except (TypeError, ValueError):
+            hops = 1
+        try:
+            limit = max(1, min(int(limit), 32))
+        except (TypeError, ValueError):
+            limit = 8
+        found = store.neighbors(memory_id, hops=hops, limit=limit)
+        if not found:
+            return ToolResult(True, "this memory has no connected facts yet "
+                              "(connect_memories adds them)")
+        import time as _time
+
+        out = []
+        for mem in found:
+            stamp = _time.strftime("%Y-%m-%d", _time.localtime(mem.created))
+            who = f" by {mem.model}" if mem.model else ""
+            scope = f" [{mem.domain}]" if mem.domain else ""
+            out.append(f"- #{mem.id} {mem.body}{scope} ({stamp}{who})")
         return ToolResult(True, "\n".join(out))
 
     def load_skill(self, name: str) -> ToolResult:
@@ -632,22 +715,33 @@ class Workspace:
         holds as ``ui``, and it has no reason to carry a skills index of its
         own.
         """
-        from .skills import list_skills, read_skill
+        from .skills import list_skills, read_skill, resolve_chain
 
         all_skills = list_skills(self.root)
         if not all_skills:
             return ToolResult(False, "no skills are installed in this harness")
-        skill = read_skill(all_skills, name or "")
-        if skill is None:
+        chain = resolve_chain(all_skills, name or "")
+        if not chain:
             known = ", ".join(s.name for s in all_skills[:12])
             return ToolResult(False, f"no skill named {name!r}; installed: {known}")
-        parts = [skill.body]
+        parts: list[str] = []
+        for index, skill in enumerate(chain):
+            header = (skill.body if index == len(chain) - 1 else
+                      f"[prerequisite: {skill.name}]\n{skill.body}")
+            parts.append(header)
+        skill = chain[-1]
         if skill.resources:
             parts.append(
                 "\nResources beside this skill (read_file them as needed): "
                 + ", ".join(p.name for p in skill.resources)
             )
-        return ToolResult(True, "\n".join(parts))
+        unmet = [r for r in skill.requires
+                 if not any((s.name or "").lower() == r.lower() for s in chain)]
+        if unmet:
+            parts.append(
+                "\nUnresolvable requires (not installed): " + ", ".join(unmet)
+            )
+        return ToolResult(True, "\n\n".join(parts))
 
 
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict:
@@ -801,6 +895,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         [],
+    ),
+    _schema(
+        "connect_memories",
+        "Link two memories as belonging in one thought. An explicit link "
+        "outranks derived ones in expand_memory and survives rewording. "
+        "Use it when you notice two recalled facts are really one subject.",
+        {
+            "from_id": {
+                "type": "integer",
+                "description": "Memory id (the #N in recall results)",
+            },
+            "to_id": {
+                "type": "integer",
+                "description": "The other memory id",
+            },
+            "why": {
+                "type": "string",
+                "description": "Optional short reason; kept on the edge",
+                "default": "",
+            },
+        },
+        ["from_id", "to_id"],
+    ),
+    _schema(
+        "expand_memory",
+        "Walk the memory graph from one memory: the facts connected to it, "
+        "nearest first. Call after recall when a fact looks like the entry "
+        "point of a larger subject.",
+        {
+            "memory_id": {
+                "type": "integer",
+                "description": "Memory id (the #N in recall results)",
+            },
+            "hops": {
+                "type": "integer",
+                "description": "1 = direct neighbours (default), 2 = one further chain",
+                "default": 1,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum rows (default 8)",
+                "default": 8,
+            },
+        },
+        ["memory_id"],
     ),
     _schema(
         "load_skill",

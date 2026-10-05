@@ -200,7 +200,94 @@ with TemporaryDirectory() as tmpdir:
                   for m in session.messages[before:]),
               str(len(session.messages) - before))
 
-        # -- the graph layer -----------------------------------------------------
+        # -- the skills graph: requires ---------------------------------------
+        sc = workspace / "skills" / "safe-changes"
+        sc.mkdir()
+        (sc / "SKILL.md").write_text(
+            "---\nname: safe-changes\ndescription: Branch and test before/after.\n---\n"
+            "# Safe Changes\n\nCreate the branch first.\n"
+        )
+        val = workspace / "skills" / "gates"
+        val.mkdir()
+        (val / "SKILL.md").write_text(
+            "---\nname: gates\ndescription: Lint, typecheck, test, build.\n"
+            "trigger:\n  keywords: [gates]\n"
+            "requires: [safe-changes]\n---\n"
+            "# Gates\n\nRun all four gates.\n"
+        )
+        found = list_skills(workspace)
+        val_skill = read_skill(found, "gates")
+        check("requires parses from frontmatter",
+              val_skill is not None and val_skill.requires == ("safe-changes",),
+              str(getattr(val_skill, "requires", None)))
+        check("the index line shows the edge",
+              val_skill is not None
+              and "(requires safe-changes)" in val_skill.index_line(),
+              val_skill.index_line() if val_skill else "?")
+
+        from rt_harness.skills import resolve_chain  # noqa: E402
+
+        chain = resolve_chain(found, "gates")
+        check("the chain loads prerequisites first",
+              [s.name for s in chain] == ["safe-changes", "gates"],
+              str([s.name for s in chain]))
+
+        # load_skill through the tool surface carries the chain.
+        result = ui.session.workspace.call("load_skill", {"name": "gates"})
+        check("load_skill returns the prerequisite then the skill",
+              result.ok and result.text.index("Safe Changes")
+              < result.text.index("Run all four gates")
+              and "[prerequisite: safe-changes]" in result.text,
+              result.text[:120])
+
+        # A cycle is cut, not followed.
+        cyc_a = workspace / "skills" / "cyc-a"
+        cyc_a.mkdir()
+        (cyc_a / "SKILL.md").write_text(
+            "---\nname: cyc-a\ndescription: cycle test a\nrequires: [cyc-b]\n---\n# A\n\na\n"
+        )
+        cyc_b = workspace / "skills" / "cyc-b"
+        cyc_b.mkdir()
+        (cyc_b / "SKILL.md").write_text(
+            "---\nname: cyc-b\ndescription: cycle test b\nrequires: [cyc-a]\n---\n# B\n\nb\n"
+        )
+        found = list_skills(workspace)
+        chain = resolve_chain(found, "cyc-a")
+        check("a requires-cycle loads each skill once",
+              sorted(s.name for s in chain) == ["cyc-a", "cyc-b"],
+              str([s.name for s in chain]))
+
+        # An unresolvable require is named in the load result.
+        ghost = workspace / "skills" / "ghost-needer"
+        ghost.mkdir()
+        (ghost / "SKILL.md").write_text(
+            "---\nname: ghost-needer\ndescription: needs a ghost\n"
+            "requires: [not-installed]\n---\n# Ghost\n\nx\n"
+        )
+        result = ui.session.workspace.call("load_skill", {"name": "ghost-needer"})
+        check("an unresolvable require is named, not silent",
+              result.ok and "not-installed" in result.text,
+              result.text[-120:])
+
+        # Trigger cascade: a keyword on validation brings safe-changes.
+        hooks2 = Hooks()
+        session2 = ChatSession(FakeClient(),
+                               ChatConfig(root=workspace, protocol="text",
+                                          thinking=False, tools=False),
+                               hooks=hooks2)
+        session2.hooks._skills_all = ui._skills_all  # type: ignore[attr-defined]
+        session2.send("please run the gates before shipping")
+        check("a trigger cascades to prerequisites",
+              any("brought safe-changes" in n for n in hooks2.notices),
+              str(hooks2.notices))
+        bodies = [m.get("content", "") for m in session2.messages
+                  if m.get("role") == "system"]
+        check("the prerequisite body precedes the triggered body",
+              any("Create the branch first" in b for b in bodies)
+              and any("Run all four gates" in b for b in bodies),
+              str(len(bodies)))
+
+        # -- the graph: model-facing tools ------------------------------------
         store = MemoryStore(root / "memory.sqlite")
         a = store.remember("The router evicts on model switch.", domain="serving",
                            model="Gemma", importance=0.7)
@@ -226,6 +313,44 @@ with TemporaryDirectory() as tmpdir:
         check("forgetting cascades to the edges",
               all(m.id != c for m in store.neighbors(a)),
               str([m.id for m in store.neighbors(a)]))
+
+        # -- the model-facing graph tools (through the workspace) ----------------
+        ws_store = store
+
+        class _MemShim:
+            """The ChatSession surface the tools read: memory + recall."""
+
+            memory = ws_store
+
+            def recall(self, query, *, domain="", limit=0):
+                return ws_store.recall(query, domain=domain, limit=limit)
+
+        ws = ui.session.workspace
+        ws._ui = _MemShim()
+
+        a2 = store.remember("Router eviction reloads the model.", domain="serving",
+                            model="Gemma", importance=0.8)
+        result = ws.call("recall", {"query": "router eviction"})
+        check("recall rows now carry ids", "#1 " in result.text
+              or f"#{a2}" in result.text, result.text[:100])
+
+        result = ws.call("connect_memories", {"from_id": a, "to_id": a2,
+                                              "why": "same subsystem"})
+        check("connect_memories links through the tool",
+              result.ok and f"#{a} <-> #{a2}" in result.text, result.text[:80])
+        result = ws.call("connect_memories", {"from_id": a, "to_id": a})
+        check("self-link through the tool is refused", not result.ok)
+        result = ws.call("connect_memories", {"from_id": a, "to_id": 99999})
+        check("a ghost id through the tool is refused",
+              not result.ok and "99999" in result.text, result.text[:80])
+
+        result = ws.call("expand_memory", {"memory_id": a})
+        check("expand_memory walks the neighbourhood with ids",
+              result.ok and f"#{a2}" in result.text, result.text[:120])
+        result = ws.call("expand_memory", {"memory_id": 99999})
+        check("expanding a ghost id is refused",
+              not result.ok and "99999" in result.text, result.text[:80])
+
         store.close()
     finally:
         skills._profile_dir = lambda: real_profile  # type: ignore[misc]
