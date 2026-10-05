@@ -16,6 +16,8 @@ same models a workspace, tools, skills, and long-term memory to work in.
 ## Running it
 
 ```bash
+pip install -r requirements.txt   # front ends + tests; the engine is stdlib-only
+
 python3 thinlizzy.py                                # the chat (default)
 python3 thinlizzy.py --no-chat --mode plan --objective "..."
 python3 -m rt_harness --mode plan --objective "..."  # same thing

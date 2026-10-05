@@ -1,0 +1,36 @@
+# K0B0L dependencies.
+#
+# The loop, the chat engine, the tool workspace, memory (SQLite FTS5),
+# skills, and MCP are standard-library only. The packages below are what
+# the interactive chat front ends and the test suites want.
+#
+# Install:  pip install -r requirements.txt
+# Everything else the harness touches (llama-server on :11434) is a
+# separate local service, not a Python dependency.
+
+# -- runtime: the Textual chat front end (the primary UI) -------------------
+textual>=8.2,<9          # the full-screen front end: transcript, folds,
+                         # pickers, command palette, skills editor
+rich>=13,<16             # markdown/panel rendering under both front ends
+                         # and the semantic colouring layer
+pygments>=2.19,<3        # code syntax highlighting in the transcript
+
+# -- runtime: the plain/legacy chat front end -------------------------------
+prompt_toolkit>=3.0,<4   # line editing and history for the rich/plain mode
+                         # (fs_chat/fs_complete); optional at runtime, kept
+                         # pinned so both front ends work out of the box
+
+# -- runtime: skills frontmatter --------------------------------------------
+pyyaml>=6.0,<7           # SKILL.md YAML frontmatter; a stdlib fallback
+                         # parser covers plain frontmatter when absent
+
+# -- development: the test suites (tests/run_all.sh, --quick) ---------------
+pytest>=8,<9             # tests/test_folds.py and tests/test_syntax.py use
+                         # the pytest runner; the rest are plain scripts
+
+# Deliberately absent, on purpose (see TODO.md "non-goals"):
+#   fastapi/uvicorn/starlette/aiohttp/flask — the web front end is planned
+#     but not built; add at that phase, not before.
+#   numpy/faiss/embedding stacks — tier-2 recall is hashed vectors in pure
+#     Python; no vector DB on a 98%-full disk.
+#   ollama/openai client SDKs — the harness speaks HTTP with stdlib urllib.
