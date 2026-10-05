@@ -3,7 +3,8 @@
 
 The behaviour requested: when the API endpoint is not accessible on
 localhost, the app should ask the operator for the address -- it can be
-assumed they want a remote API.
+assumed they want a remote API -- and the answer is saved as the default
+used on every subsequent load.
 
 Pinned here, no model and no TTY needed:
   * non-interactive runs (piped stdin) keep the old behaviour: fail with
@@ -12,15 +13,19 @@ Pinned here, no model and no TTY needed:
     configured remote endpoint is never second-guessed
   * a bare host:port answer gets the http:// scheme; a full URL passes
   * the four entry points wire the retry (probe again with the answer)
+  * the answer is persisted (set_default_api) and startup honours it
+    (Config.from_env falls back to the saved default); API_URL wins
 """
 from __future__ import annotations
 
 import io
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from rt_harness import catalog  # noqa: E402
 from rt_harness.config import Config  # noqa: E402
 from rt_harness.tui import ask_endpoint_on_failure  # noqa: E402
 
@@ -38,6 +43,53 @@ def check(label, cond, detail=""):
         print(f"FAIL {label}  {detail}")
 
 
+# -- persistence: the answer becomes the saved default -----------------------
+# The suite never touches the operator's real ~/.k0b0l-apis.json: the
+# catalog's path function is pointed at a temp file, the same trick the
+# skills suite uses for the profile dir.
+with TemporaryDirectory() as tmp:
+    apis_file = Path(tmp) / "apis.json"
+    real_path = catalog._apis_path
+    catalog._apis_path = lambda: apis_file  # type: ignore[misc]
+    try:
+        check("no saved default at first", catalog.default_api() == "")
+        check("saving the answer marks it default",
+              catalog.set_default_api("http://192.168.99.2:11434/v1"))
+        check("the saved default reads back",
+              catalog.default_api() == "http://192.168.99.2:11434/v1")
+        # one default only: saving another clears the first
+        catalog.set_default_api("https://api.example.com/v1")
+        check("only one default exists at a time",
+              catalog.default_api() == "https://api.example.com/v1",
+              catalog.default_api())
+        records = catalog._read_endpoints()
+        check("exactly one record is marked default",
+              sum(1 for r in records if r.get("default")) == 1)
+        # startup honours the saved default when no env names a URL
+        config_saved = Config.from_env({})
+        check("startup uses the saved default when API_URL is unset",
+              config_saved.api_url == "https://api.example.com/v1",
+              config_saved.api_url)
+        config_pinned = Config.from_env(
+            {"API_URL": "http://127.0.0.1:11434/v1"})
+        check("an explicit API_URL still overrides the saved default",
+              config_pinned.api_url == "http://127.0.0.1:11434/v1",
+              config_pinned.api_url)
+        # set_api (the in-session picker) also becomes the default
+        class _Cfg:
+            ollama_url = "http://127.0.0.1:11434/v1"
+
+        cfg = _Cfg()
+        catalog.set_api(cfg, "http://10.0.0.5:11434")
+        check("selecting an endpoint in-session also updates the default",
+              catalog.default_api() == "http://10.0.0.5:11434",
+              catalog.default_api())
+    finally:
+        catalog._apis_path = real_path  # type: ignore[misc]
+
+# the helper's answer path persists: exercise() now saves through
+# set_default_api, so run it against the temp file too. (Moved below the
+# exercise() definition -- it stubs input() to simulate the TTY prompt.)
 # -- the helper never blocks without a TTY -----------------------------------
 config = Config.from_env({"API_URL": "http://127.0.0.1:11434/v1"})
 result = ask_endpoint_on_failure(config, running=False)
@@ -94,6 +146,20 @@ check("a bare host:port gets the http scheme",
       exercise("192.168.99.2:11434"))
 check("a full URL passes through untouched",
       exercise("https://api.example.com/v1") == "https://api.example.com/v1")
+
+# -- the prompt's own answer path persists the default -----------------------
+with TemporaryDirectory() as tmp:
+    apis_file = Path(tmp) / "apis.json"
+    real_path = catalog._apis_path
+    catalog._apis_path = lambda: apis_file  # type: ignore[misc]
+    try:
+        answered = exercise("192.168.99.2:11434")
+        check("the prompt's answer is persisted as the default",
+              answered == "http://192.168.99.2:11434"
+              and catalog.default_api() == "http://192.168.99.2:11434",
+              str(catalog.default_api()))
+    finally:
+        catalog._apis_path = real_path  # type: ignore[misc]
 check("an empty answer returns the original (operator gave up)",
       exercise("") == "http://127.0.0.1:11434/v1")
 

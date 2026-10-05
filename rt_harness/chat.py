@@ -108,11 +108,27 @@ _MALFORMED_TOOL_CALL_MARKERS = (
     "invalid character",
 )
 
+#: The server's own context-overflow refusal (captured from the live
+#: llama-server, not guessed): HTTP 400 with
+#: ``{"code":400, "type":"exceed_context_size_error", "n_ctx": N, ...}``.
+#: A prompt bigger than the window is rejected *before* any allocation, so
+#: nothing is lost by retrying -- the history just has to shrink first.
+_OVERFLOW_MARKERS = (
+    "exceed_context_size_error",
+    "exceeds the available context size",
+)
+
 
 def _is_malformed_tool_call(exc: BaseException) -> bool:
     """Is this error the model's own bad tool-call JSON?"""
     text = str(exc).lower()
     return any(marker in text for marker in _MALFORMED_TOOL_CALL_MARKERS)
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """Did the server refuse this prompt because it exceeds its window?"""
+    text = str(exc).lower()
+    return any(marker in text for marker in _OVERFLOW_MARKERS)
 
 
 #: The standing instruction for the dedicated compression turn. One job,
@@ -756,6 +772,10 @@ class ChatSession:
         self._trim()
         final = ""
         tool_call_retry_used = False
+        #: One automatic compression per turn: an overflow error compresses
+        #: and retries once; a second overflow means the compressed history
+        #: genuinely cannot fit and the error path reports it.
+        overflow_compress_used = False
         #: Index of a retry nudge currently sitting in the history. It is there
         #: for exactly one round -- the model must see it to correct itself -- and
         #: is removed once that round comes back, so the transcript never keeps a
@@ -793,6 +813,27 @@ class ChatSession:
                         )
                         nudge_index = len(self.messages) - 1
                         continue
+                    if _is_context_overflow(exc) and not overflow_compress_used:
+                        # The server refused the prompt for size, before
+                        # allocating anything: the turn is not lost, the
+                        # history is just too heavy. Compress once and
+                        # retry -- the fold the /compact command makes
+                        # manually, made automatic exactly when it is
+                        # needed. If the compressed history *still* does
+                        # not fit, the error path below reports honestly.
+                        overflow_compress_used = True
+                        self.hooks.notice(
+                            "the prompt exceeded the server's context window "
+                            f"({_one_line(exc)}); compressing the conversation "
+                            "and retrying"
+                        )
+                        report = self.compress(via_tool=False)
+                        if report:
+                            continue
+                        self.hooks.notice(
+                            "compression failed on overflow; the history is "
+                            "untouched"
+                        )
                     self.hooks.error(str(exc))
                     # Drop the unanswered user turn so the next attempt is not
                     # stacked behind a message that never got a reply. The nudge

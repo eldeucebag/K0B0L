@@ -423,9 +423,16 @@ class Config:
                 f"got {tool_output!r}"
             )
 
+        from .catalog import default_api
+
+        saved_default = default_api()
         return cls(
             api_url=(
                 _env_first(env, "API_URL", "OPENAI_URL", "OLLAMA_URL")
+                # A saved endpoint (e.g. answered at the dead-localhost
+                # prompt) outlives the process that saved it; an explicit
+                # env still wins so scripts can pin deliberately.
+                or saved_default
                 or DEFAULT_API_URL
             ),
             roles=roles,

@@ -104,10 +104,20 @@ def ask_endpoint_on_failure(config: "Config", *, running: bool) -> str:
     # _pick_client decides by the /v1 suffix, not by the host.
     if "://" not in answer:
         answer = "http://" + answer
-    print(
-        f"using {answer} (set API_URL={answer} to make it permanent)",
-        file=sys.stderr,
-    )
+    # Persist the answer as the saved default so every subsequent load
+    # uses it without asking again; API_URL still overrides when set.
+    from .catalog import set_default_api
+
+    if set_default_api(answer):
+        print(
+            f"using {answer} (saved as your default; set API_URL to override)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"using {answer} for this session (could not save it permanently)",
+            file=sys.stderr,
+        )
     return answer
 
 
