@@ -1,0 +1,14 @@
+[Unit]
+Description=K0B0L llama-server router (models on demand, :11434)
+After=network.target
+
+[Service]
+Type=simple
+User=jeff
+WorkingDirectory=/home/jeff/llama-prism-b10743-adfffbe
+ExecStart=/home/jeff/llama-prism-b10743-adfffbe/llama-server --models-dir ./models --models-preset ./models.ini --models-max 1 --host 0.0.0.0 --port 11434
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=K0B0L GPU swap supervisor (llama :11434 / images :7860, swaps on :7861)
+After=network.target
+
+[Service]
+Type=simple
+User=jeff
+WorkingDirectory=/home/jeff/redtram
+ExecStart=/home/jeff/miniconda3/bin/python3 /home/jeff/redtram/tools/gpu_swap_server.py
+Restart=always
+RestartSec=3
+Environment=K0B0L_SWAP_PORT=7861
+
+[Install]
+WantedBy=multi-user.target
