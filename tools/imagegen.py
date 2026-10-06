@@ -72,6 +72,129 @@ def gpu_is_busy() -> bool:
         return False
 
 
+#: The image API on the GPU box (sd.cpp's sd-server, OpenAI /v1/images).
+#: Generation goes here first -- the harness may live on a different
+#: machine than the GPU -- and falls back to the local subprocess only
+#: when no server answers.
+IMAGE_API = os.environ.get("K0B0L_IMAGE_API", "http://127.0.0.1:7860")
+
+#: The GPU-box swap supervisor (tools/gpu_swap_server.py): owns llama
+#: and sd-server on the one card, swapping them on request. When the
+#: image API is down but this answers, the client swaps, generates, and
+#: swaps back -- the load/unload you'd otherwise do by hand.
+SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
+
+
+def api_up(url: str = "") -> bool:
+    """Is the image API answering? (Cheap probe; no GPU work.)"""
+    import urllib.request
+
+    base = (url or IMAGE_API).rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/v1/models", timeout=2) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def swap_available() -> bool:
+    """Is the swap supervisor answering on the GPU box?"""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(SWAP_API.rstrip("/") + "/state",
+                                    timeout=2) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def swap_to_image(model: str) -> bool:
+    """Ask the supervisor to bring the image service up (llama goes down)."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    payload = json.dumps({"model": model}).encode()
+    request = urllib.request.Request(
+        SWAP_API.rstrip("/") + "/swap/image", data=payload,
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=200) as r:
+            return json.loads(r.read()).get("ok", False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"swap supervisor: {exc}", file=sys.stderr)
+        return False
+
+
+def swap_back_to_llm() -> None:
+    """Return the card to the text models; best-effort, never raises."""
+    import urllib.request
+
+    try:
+        request = urllib.request.Request(
+            SWAP_API.rstrip("/") + "/swap/llm", data=b"{}",
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(request, timeout=140)
+    except Exception:  # noqa: BLE001
+        print("warning: could not swap back to the llm service",
+              file=sys.stderr)
+
+
+def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
+                steps: int, seed: int, neg: str) -> bool:
+    """Generate through the image API (POST /v1/images/generations).
+
+    Returns True and writes ``out_path`` on success; False (with the
+    reason on stderr) otherwise. Native knobs -- model params like steps,
+    seed, sampler -- ride inside the prompt via sd.cpp's
+    ``<sd_cpp_extra_args>`` extension, the documented way for the OpenAI
+    compatibility surface.
+    """
+    import base64
+    import json
+    import urllib.error
+    import urllib.request
+
+    extra: dict = {"sample_params": {}}
+    if steps:
+        extra["sample_params"]["sample_steps"] = int(steps)
+    if seed:
+        extra["sample_params"]["seed"] = int(seed)
+    if neg:
+        extra["sample_params"]["negative_prompt"] = neg
+    body_prompt = prompt
+    if extra["sample_params"]:
+        body_prompt = (f"{prompt} <sd_cpp_extra_args>"
+                       f"{json.dumps(extra)}</sd_cpp_extra_args>")
+    payload = json.dumps({
+        "prompt": body_prompt,
+        "n": 1,
+        "size": size,
+        "output_format": "png",
+    }).encode()
+    request = urllib.request.Request(
+        IMAGE_API.rstrip("/") + "/v1/images/generations",
+        data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            data = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        print(f"image api: HTTP {exc.code}: {detail}", file=sys.stderr)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        print(f"image api unreachable: {exc}", file=sys.stderr)
+        return False
+    rows = data.get("data") or []
+    if not rows or not rows[0].get("b64_json"):
+        print("image api returned no image data", file=sys.stderr)
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(base64.b64decode(rows[0]["b64_json"]))
+    return True
+
+
 def _slug(text: str, width: int = 24) -> str:
     out = "".join(c if c.isalnum() else "-" for c in text.lower())
     return (out[:width]).strip("-") or "image"
@@ -82,27 +205,57 @@ def gen(model: str, prompt: str, out: str | None, size: str,
     if model not in FILES:
         print(f"unknown model {model!r}: {'/'.join(FILES)}", file=sys.stderr)
         return 2
-    missing = [v for v in FILES[model].values()
-               if not (MODELS_DIR / v).is_file()]
-    if missing:
-        print(f"{model} is not fully downloaded yet: {', '.join(missing)}",
-              file=sys.stderr)
-        return 2
-    if gpu_is_busy():
-        print("the GPU looks occupied (llama-server running?): stop it "
-              "before generating (image and text services share the card)",
-              file=sys.stderr)
-        return 3
-
-    import torch
 
     width, height = (int(n) for n in size.lower().split("x"))
     out_path = Path(out).expanduser() if out else (
         OUT_DIR / f"{model}-{_slug(prompt)}-{int(time.time())}.png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # The API first: on this network the GPU box is the server and the
+    # harness may run elsewhere entirely. When the image service is down
+    # but the swap supervisor is up, the client swaps the card over,
+    # generates, and swaps back -- the load/unload is a request, not a
+    # chore. Everything below is the same-box, no-supervisor fallback.
+    via_swap = False
+    if not api_up() and swap_available():
+        print(f"[{model}] swapping the GPU to image service "
+              f"(llm pauses)...", file=sys.stderr)
+        if swap_to_image(model):
+            via_swap = True
+        else:
+            print("the swap supervisor could not start the image service",
+                  file=sys.stderr)
+    if api_up():
+        print(f"[{model}] via image api {IMAGE_API}...", file=sys.stderr)
+        ok = gen_via_api(model, prompt, out_path, size, steps, seed, neg)
+        if via_swap:
+            print("swapping the GPU back to the llm service...",
+                  file=sys.stderr)
+            swap_back_to_llm()
+        if ok:
+            print(f"saved {out_path}")
+            return 0
+        print("the image api failed; falling back to local generation",
+              file=sys.stderr)
+    elif via_swap:
+        swap_back_to_llm()
+
+    missing = [v for v in FILES[model].values()
+               if not (MODELS_DIR / v).is_file()]
+    if missing:
+        print(f"{model} is not fully downloaded here: {', '.join(missing)}",
+              file=sys.stderr)
+        return 2
+    if gpu_is_busy():
+        print("the GPU looks occupied (llama-server running?): stop it "
+              "before generating, or start the image api server "
+              "(rt-image-server.sh) and retry", file=sys.stderr)
+        return 3
+
     started = time.time()
     print(f"[{model}] loading...", file=sys.stderr)
+    import torch
+
     torch_dtype = torch.bfloat16
 
     if model == "pony":
