@@ -60,6 +60,7 @@ HELP = """commands
   /clear             forget the conversation (keeps the system message)
   /history           messages held, and how many tool calls have run
   /compact           summarize the conversation and continue from the summary
+  /image [model] <prompt>   generate an image locally (pony|qwen|chroma)
   /exit              leave (ctrl-d works too)
 """
 
@@ -287,6 +288,10 @@ class ChatUI(ChatHooks):
     def notice(self, text: str) -> None:
         self.line(f"  · {text}")
 
+    def show_image(self, relative_path: str) -> None:
+        """An image arrived; the base front end can only name it."""
+        self.line(f"  · image saved: {relative_path}")
+
     def error(self, text: str) -> None:
         self.line(f"  ! {text}")
 
@@ -419,6 +424,26 @@ class ChatUI(ChatHooks):
             )
         elif command == "/compact":
             self.line(self.session.compress_command())
+        elif command == "/image":
+            # The operator's shortcut into the same generate_image path the
+            # model has: guards, models, and rendering all match.
+            from .tools import Workspace
+
+            rest = argument.strip()
+            if not rest or rest in ("list", "help"):
+                self.line("usage: /image <prompt>   (or: /image pony|qwen|chroma <prompt>)")
+                self.line("models: pony (fast, tags), qwen (adherent), chroma (flux-class)")
+                return True
+            parts = rest.split(maxsplit=1)
+            model = "pony"
+            prompt = rest
+            if parts[0].lower() in ("pony", "qwen", "chroma") and len(parts) > 1:
+                model, prompt = parts[0].lower(), parts[1].strip()
+            ws = Workspace(self.session.workspace.root, allow_exec=False,
+                           ui=self)
+            result = ws.call("generate_image",
+                            {"prompt": prompt, "model": model})
+            self.line(result.text)
         elif command == "/skills":
             verb, _, rest = argument.partition(" ")
             verb, rest = verb.strip().lower(), rest.strip()

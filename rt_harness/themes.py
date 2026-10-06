@@ -565,12 +565,13 @@ SEMANTIC_ROLES: dict[str, dict[str, str]] = {
 
 #: The block kinds that get a band and a fold. Order is the order `/fold`
 #: reports them in.
-BLOCK_KINDS: tuple[str, ...] = ("reasoning", "code")
+BLOCK_KINDS: tuple[str, ...] = ("reasoning", "code", "image")
 
 #: Block kind -> the theme variable holding the background it paints.
 BLOCK_BACKGROUND_VARS: dict[str, str] = {
     "reasoning": "reasoning-background",
     "code": "code-background",
+    "image": "code-background",
 }
 
 

@@ -15,6 +15,7 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/skills list\|enable\|disable <name>` | Manage skills: list, or pin/unpin one into every turn |
 | `/skills edit [name]` | Open the skills editor (see `docs/skills`); a name opens that skill directly |
 | `/compact` | Compress the conversation into one summary and continue from it — durable facts are written to the memory store, and earlier memories are recalled into the compacted context |
+| `/image [model] <prompt>` | Generate an image locally (pony\|qwen\|chroma — see `docs/imagegen`); the model has the same `generate_image` tool |
 | `/session save\|load\|list <name>` | Persist or resume a conversation |
 | `/run start [key=value ...] <objective>` | Spawn a cycle run |
 | `/run status\|tail [N]\|stop` | Watch or stop the current run |

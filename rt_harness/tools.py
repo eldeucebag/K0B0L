@@ -438,6 +438,7 @@ class Workspace:
             "connect_memories": self.connect_memories,
             "expand_memory": self.expand_memory,
             "compress_context": self.compress_context,
+            "generate_image": self.generate_image,
             "load_skill": self.load_skill,
         }
         handler = handlers.get(name)
@@ -733,6 +734,88 @@ class Workspace:
                           "arrives as the next message; continue from it "
                           "without calling this again.")
 
+    def generate_image(
+        self,
+        prompt: str,
+        model: str = "",
+        size: str = "",
+        steps: int = 0,
+        seed: int = 0,
+        negative_prompt: str = "",
+    ) -> ToolResult:
+        """Generate an image locally and save it into the workspace.
+
+        Runs the harness's image service (tools/imagegen.py) against the
+        three local uncensored models: ``pony`` (Pony Diffusion V6 XL --
+        fast, tag-style prompting), ``qwen`` (Qwen-Image-2.1-UC with the
+        Heretic encoder -- best prompt adherence), ``chroma`` (uncensored
+        Flux-class). The image lands under images/ in the workspace root
+        and is shown to the operator in the chat.
+
+        Image generation and the text models share the one GPU: the
+        service refuses if the model server is holding the card. Expect
+        roughly a minute for pony and a few minutes for qwen/chroma at
+        768x768. The path is returned; describe the image to the operator
+        from the prompt you chose.
+        """
+        runner = Path(__file__).resolve().parent.parent / "tools" / "imagegen.py"
+        if not runner.is_file():
+            return ToolResult(False, "the image service (tools/imagegen.py) "
+                              "is not installed in this harness checkout")
+        allowed = ("pony", "qwen", "chroma")
+        model = (model or "").strip().lower() or "pony"
+        if model not in allowed:
+            return ToolResult(False, f"model must be one of {', '.join(allowed)}")
+        out_dir = self.root / "images"
+        argv = [sys.executable, str(runner), "gen", model, prompt or ""]
+        if size:
+            argv += ["--size", str(size)]
+        if steps:
+            argv += ["--steps", str(steps)]
+        if seed:
+            argv += ["--seed", str(seed)]
+        if negative_prompt:
+            argv += ["--neg", negative_prompt]
+        argv += ["--out", str(out_dir / f"{model}-{int(time.time())}.png")]
+        expected_out = argv[argv.index("--out") + 1]
+        try:
+            # Ten minutes: qwen/chroma run minutes per image on this GPU.
+            completed = subprocess.run(  # noqa: S603 - argv list, no shell
+                argv, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            return ToolResult(False, "image generation timed out after ten "
+                              "minutes; try fewer steps or the pony model")
+        except OSError as exc:
+            return ToolResult(False, f"could not run the image service: {exc}")
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            # The runner explains GPU-busy and missing-model conditions
+            # itself; pass the last line through, it is the human part.
+            last = detail.splitlines()[-1] if detail else "unknown error"
+            return ToolResult(False, f"image generation failed: {last}")
+        # The --out we passed is authoritative; the runner appends a
+        # duration to its "saved <path>" line, so parsing it back is
+        # fragile -- the path is known, and the file proves it ran.
+        saved = expected_out
+        if not Path(saved).is_file():
+            return ToolResult(False, "the image service finished without "
+                              f"writing {saved}")
+        try:
+            relative = Path(saved).resolve().relative_to(self.root)
+        except ValueError:
+            return ToolResult(False, f"the image service saved outside the "
+                              f"workspace: {saved}")
+        # Tell the UI to show it: hooks.image() when a front end is bound.
+        show = getattr(self._ui, "show_image", None)
+        if callable(show):
+            try:
+                show(str(relative))
+            except Exception:  # noqa: BLE001 - a UI failure must not lose the file
+                pass
+        return ToolResult(True, f"image saved to images/{relative} "
+                          f"(shown to the operator); prompt was: "
+                          f"{(prompt or '')[:80]}")
+
     def load_skill(self, name: str) -> ToolResult:
         """Load one skill's full body on demand (progressive disclosure).
 
@@ -982,6 +1065,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "arrives as the next message.",
         {},
         [],
+    ),
+    _schema(
+        "generate_image",
+        "Generate an image locally from a text prompt and show it to the "
+        "operator. Models: pony (fast, tag-style prompting), qwen (best "
+        "prompt adherence, slower), chroma (Flux-class). The image is "
+        "saved under images/ and rendered in the chat. The image service "
+        "and the text models share the one GPU; if it reports the GPU is "
+        "busy, tell the operator to stop the model server first.",
+        {
+            "prompt": {
+                "type": "string",
+                "description": "What to draw; for pony, comma-separated tags work best",
+            },
+            "model": {
+                "type": "string",
+                "description": "pony | qwen | chroma (default pony)",
+                "default": "pony",
+                "enum": ["pony", "qwen", "chroma"],
+            },
+            "size": {
+                "type": "string",
+                "description": "WxH, e.g. 768x768 (default)",
+                "default": "768x768",
+            },
+            "steps": {
+                "type": "integer",
+                "description": "Sampling steps (default: 20-28 by model)",
+                "default": 0,
+            },
+            "seed": {
+                "type": "integer",
+                "description": "Reproducibility seed (0 = time-based)",
+                "default": 0,
+            },
+            "negative_prompt": {
+                "type": "string",
+                "description": "What to avoid (pony especially)",
+                "default": "",
+            },
+        },
+        ["prompt"],
     ),
     _schema(
         "load_skill",

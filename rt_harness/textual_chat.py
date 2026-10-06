@@ -26,6 +26,7 @@ from rich.cells import cell_len
 from rich.segment import Segment
 from rich.style import Style
 from rich.syntax import Syntax
+from rich.console import Group
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
@@ -330,8 +331,8 @@ class SuggestorForChat(Suggester):
 
 _COMMANDS = ["/help", "/tools", "/think", "/read", "/run", "/paste",
              "/model", "/models", "/target", "/root", "/clear", "/history",
-             "/compact", "/exit", "/theme", "/semantic", "/skills",
-             "/session", "/docs", "/soul"]
+             "/compact", "/image", "/exit", "/theme", "/semantic",
+             "/skills", "/session", "/docs", "/soul"]
 
 #: One-line descriptions for the Ctrl-P command dispatch. Filled by texting.
 COMMAND_INFO = {
@@ -350,6 +351,7 @@ COMMAND_INFO = {
     "/clear": "clear the conversation",
     "/history": "show message counts",
     "/compact": "compress the conversation into a summary and continue",
+    "/image": "generate an image locally (pony|qwen|chroma)",
     "/exit": "leave the chat",
     "/theme": "switch the UI theme",
     "/semantic": "colour data in the transcript",
@@ -540,6 +542,30 @@ class Transcript(RichLog):
         )
         return self._pad(text, width, f"{paint} italic".strip())
 
+    def _image(self, block: Block, width: int):
+        """The image itself, via textual-image.
+
+        Sixel-capable terminals get full-colour pixels; everything else
+        gets the half-block renderer -- chunky but recognisable. The
+        renderable is guarded: a missing file must not break the
+        transcript, so it degrades to a named path.
+        """
+        from pathlib import Path as _P
+
+        path = _P(block.body).expanduser()
+        if not path.is_file():
+            placeholder = Text(block.body, style="dim italic")
+            return Group(placeholder)
+        try:
+            from textual_image.renderable import Image as _TImage
+
+            return Group(
+                _TImage(str(path), width=min(width, 64)),
+                Text(f" {block.body}", style="dim"),
+            )
+        except Exception as exc:  # noqa: BLE001 - never lose the transcript
+            return Group(Text(f" {block.body} ({exc})", style="dim italic"))
+
     def _code(self, block: Block, background: str, width: int) -> Syntax:
         """Code on the code band, through rich's own highlighter."""
         source = block.body
@@ -573,6 +599,8 @@ class Transcript(RichLog):
             return [header]
         if block.kind == "code":
             return [header, self._code(block, background, width)]
+        if block.kind == "image":
+            return [header, self._image(block, width)]
         return [header, self._reasoning(block, width, paint)]
 
     def _draw(self, block: Block, scroll_end: bool | None = None) -> None:
@@ -609,6 +637,17 @@ class Transcript(RichLog):
 
     def write_prose(self, text: str) -> None:
         self._add("prose", text)
+
+    def write_image(self, path: str, label: str = "") -> None:
+        """An image: a header band, then the pixels themselves.
+
+        The path (absolute, workspace-resolved at write time) is stored as
+        the block body so a rerender -- a fold above it, a theme change --
+        can rebuild the renderable. Terminals without sixel/iTerm/kitty
+        support get the half-block renderer instead: lower fidelity, but
+        the image is still visible as an image, not a filename.
+        """
+        self._add("image", path, language=label or "image")
 
     def write_code(self, language: str, code: str) -> None:
         self._add("code", code, language=language)
@@ -1648,6 +1687,11 @@ class ChatApp(App[Any]):
             text, folded=not self.ui.show_thinking
         )
 
+    def _show_image(self, absolute_path: str, label: str = "") -> None:
+        """App-thread half of ``show_image`` (the hooks half marshals here)."""
+        self.query_one("#transcript", Transcript).write_image(
+            absolute_path, label=label or "image")
+
     def fold_kind(self, kind: str, folded: bool) -> None:
         """Fold or unfold every ``kind`` block already on screen."""
         transcript = self.query_one("#transcript", Transcript)
@@ -2033,6 +2077,20 @@ class TextualChatUI(ChatUI):
     def notice(self, text: str) -> None:
         self._flush_thinking()
         self._write(f"  · {text}\n")
+
+    def show_image(self, relative_path: str) -> None:
+        """Render a generated image into the transcript.
+
+        ``relative_path`` is workspace-relative as the image tool reports
+        it. The work runs on the app thread like every other render: the
+        tool call arrives from the engine thread, and Textual widgets may
+        only be touched from their own.
+        """
+        self._flush_thinking()
+        root = self.session.workspace.root
+        absolute = (root / relative_path).resolve()
+        self._dispatch("_show_image", str(absolute),
+                       Path(relative_path).name)
 
     def error(self, text: str) -> None:
         self._flush_thinking()

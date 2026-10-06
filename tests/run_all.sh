@@ -12,9 +12,9 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 PY="${PYTHON:-python3}"
-tests=(test_tools.py test_verdict.py test_recovery.py test_toolloop.py test_compress.py test_overflow.py test_endpoint_fallback.py test_memory.py test_selfmem.py test_skills.py test_skills2.py test_skills_editor.py test_runctl.py test_cycle.py test_engine.py test_frontend.py test_pty.py test_fspty.py test_soul.py test_docs.py test_themes.py test_semantic.py test_menubar.py test_sessions.py test_openai_compat.py)
+tests=(test_tools.py test_verdict.py test_recovery.py test_toolloop.py test_compress.py test_overflow.py test_endpoint_fallback.py test_imagegen_tool.py test_memory.py test_selfmem.py test_skills.py test_skills2.py test_skills_editor.py test_runctl.py test_cycle.py test_engine.py test_frontend.py test_pty.py test_fspty.py test_soul.py test_docs.py test_themes.py test_semantic.py test_menubar.py test_sessions.py test_openai_compat.py)
 if [ "${1:-}" = "--quick" ]; then
-    tests=(test_tools.py test_verdict.py test_recovery.py test_toolloop.py test_compress.py test_overflow.py test_endpoint_fallback.py test_memory.py test_selfmem.py test_skills.py test_skills2.py test_skills_editor.py test_cycle.py test_soul.py test_docs.py test_themes.py test_semantic.py test_menubar.py test_sessions.py test_openai_compat.py)
+    tests=(test_tools.py test_verdict.py test_recovery.py test_toolloop.py test_compress.py test_overflow.py test_endpoint_fallback.py test_imagegen_tool.py test_memory.py test_selfmem.py test_skills.py test_skills2.py test_skills_editor.py test_cycle.py test_soul.py test_docs.py test_themes.py test_semantic.py test_menubar.py test_sessions.py test_openai_compat.py)
 fi
 
 failed=0

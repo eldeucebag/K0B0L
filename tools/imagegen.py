@@ -97,9 +97,9 @@ def gen(model: str, prompt: str, out: str | None, size: str,
     import torch
 
     width, height = (int(n) for n in size.lower().split("x"))
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = Path(out).expanduser() if out else (
         OUT_DIR / f"{model}-{_slug(prompt)}-{int(time.time())}.png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
     print(f"[{model}] loading...", file=sys.stderr)

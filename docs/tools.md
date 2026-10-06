@@ -23,6 +23,7 @@ the reason the harness can hand tools to an abliterated model at all.
 | `connect_memories(from_id, to_id, why)` | Link two memories as one subject — an explicit graph edge |
 | `expand_memory(memory_id, hops, limit)` | Walk the memory graph from one memory, nearest first |
 | `compress_context()` | Fold this conversation into a summary and continue from it — the model's half of `/compact` |
+| `generate_image(prompt, model, size, steps, seed, negative_prompt)` | Generate an image locally (pony\|qwen\|chroma) and show it in the chat — see `docs/imagegen` |
 | `load_skill(name)` | Open one installed skill's full procedure, prerequisites first (see `docs/skills`) |
 
 ## Info tools
