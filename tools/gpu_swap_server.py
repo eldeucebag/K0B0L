@@ -57,8 +57,15 @@ def image_healthy() -> bool:
 
 
 def stop_llama() -> None:
-    subprocess.run(["pkill", "-f", "llama-server --models-dir"],
+    # The llama service is systemd-managed (k0b0l-llama, Restart=always):
+    # a bare pkill would have systemd resurrect it mid-swap and re-take
+    # the card while the image server is loading. Stop the unit itself;
+    # fall back to pkill for non-systemd setups.
+    subprocess.run(["sudo", "-n", "systemctl", "stop", "k0b0l-llama.service"],
                    check=False)
+    if healthy(LLAMA_URL):
+        subprocess.run(["pkill", "-f", "llama-server --models-dir"],
+                       check=False)
     for _ in range(30):
         if not healthy(LLAMA_URL):
             return
@@ -79,6 +86,13 @@ def stop_sd() -> None:
 
 
 def start_llama() -> None:
+    # Prefer the systemd unit (k0b0l-llama) so the service manager owns
+    # the process again; the direct spawn is the non-systemd fallback.
+    stopped = subprocess.run(
+        ["sudo", "-n", "systemctl", "start", "k0b0l-llama.service"],
+        check=False)
+    if stopped.returncode == 0:
+        return
     log = open(LLAMA_LOG, "ab")
     subprocess.Popen(
         ["./llama-server", "--models-dir", "./models",

@@ -27,23 +27,24 @@ pip install -r requirements.txt
 
 # point the harness at the GPU box (one of):
 export API_URL="http://192.168.99.38:11434/v1"     # explicit, always wins
-# or answer the dead-localhost prompt once, and it is saved
-#   as the default in ~/.k0b0l-apis.json
-
-# for image generation over the API, also:
-export K0B0L_IMAGE_API="http://192.168.99.38:7860"
-export K0B0L_SWAP_API="http://192.168.99.38:7861"
+# or answer the dead-localhost prompt once on first start -- the
+#   address is saved as the default in ~/.k0b0l-apis.json
 
 python3 thinlizzy.py
 ```
 
-With those two image variables set, `generate_image` and `/image` run
-entirely over the network: when the image service is down, the client
-asks the supervisor to swap the GPU (`POST /swap/image`), generates via
-`POST /v1/images/generations`, and swaps the card back to the text
-models — no SSH, no manual load/unload. The local-subprocess fallback
-stays dormant because it would find no GPU and no weights on a client
-box; the API path is the only one that ever runs there.
+That one address is all image generation needs too: the image API
+(`:7860`) and the swap supervisor (`:7861`) are the same GPU box on
+fixed sibling ports, so they **derive from the configured endpoint's
+host**. With the harness pointed at the GPU box, `generate_image` and
+`/image` run entirely over the network: when the image service is
+down, the client asks the supervisor to swap the GPU, generates via
+`POST /v1/images/generations`, and swaps the card back — no SSH, no
+manual load/unload, no extra variables.
+
+(`K0B0L_IMAGE_API` / `K0B0L_SWAP_API` still exist as explicit overrides
+for the day the services ever live on separate boxes; normally you
+never set them.)
 
 ## Notes
 

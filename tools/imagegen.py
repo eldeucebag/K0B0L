@@ -72,17 +72,53 @@ def gpu_is_busy() -> bool:
         return False
 
 
+#: One address drives everything. The operator answers the endpoint prompt
+#: once (or sets API_URL); the image API and the swap supervisor are the
+#: same GPU box, on fixed sibling ports -- 11434 for text, 7860 for
+#: images, 7861 for swaps -- so they derive from the configured endpoint's
+#: host. Explicit env wins when a setup ever splits them across boxes.
+def _derive_from_endpoint(env_name: str, port: int) -> str:
+    import os
+    from urllib.parse import urlparse
+
+    explicit = os.environ.get(env_name)
+    if explicit:
+        return explicit
+    # The configured LLM endpoint names the GPU box; reuse its host.
+    try:
+        from rt_harness.config import Config
+
+        # None = read the live environment (API_URL, saved default, all of it)
+        base = Config.from_env(None).api_url
+    except ImportError:
+        # Running as a plain script (tools/ is not a package): find the
+        # repo root the way the rest of this file does.
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _root = _Path(__file__).resolve().parent.parent
+        if str(_root) not in _sys.path:
+            _sys.path.insert(0, str(_root))
+        from rt_harness.config import Config
+
+        base = Config.from_env(None).api_url
+    except Exception:  # noqa: BLE001 - config problems surface elsewhere
+        base = "http://127.0.0.1:11434/v1"
+    host = urlparse(base).hostname or "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
 #: The image API on the GPU box (sd.cpp's sd-server, OpenAI /v1/images).
 #: Generation goes here first -- the harness may live on a different
 #: machine than the GPU -- and falls back to the local subprocess only
 #: when no server answers.
-IMAGE_API = os.environ.get("K0B0L_IMAGE_API", "http://127.0.0.1:7860")
+IMAGE_API = _derive_from_endpoint("K0B0L_IMAGE_API", 7860)
 
 #: The GPU-box swap supervisor (tools/gpu_swap_server.py): owns llama
 #: and sd-server on the one card, swapping them on request. When the
 #: image API is down but this answers, the client swaps, generates, and
 #: swaps back -- the load/unload you'd otherwise do by hand.
-SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
+SWAP_API = _derive_from_endpoint("K0B0L_SWAP_API", 7861)
 
 
 def api_up(url: str = "") -> bool:
