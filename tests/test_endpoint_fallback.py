@@ -122,8 +122,22 @@ class FakeTTY:
 
 
 def exercise(answer_text):
+    """One prompt-path run, ALWAYS against a scratch apis.json.
+
+    ask_endpoint_on_failure persists the answer as the saved default; an
+    exercise() against the real ~/.k0b0l-apis.json would corrupt the
+    operator's config (this once happened: a fake URL from the suite
+    leaked into the live file). The scratch file also proves the
+    persistence each call.
+    """
     real_stdin, real_stdout, real_stderr = (sys.stdin, sys.stdout, sys.stderr)
     real_input = __builtins__["input"] if isinstance(__builtins__, dict) else __builtins__.input
+    real_path = catalog._apis_path
+    scratch = Path(__file__).parent / ".scratch"
+    scratch.mkdir(exist_ok=True)
+    apis_file = scratch / "exercise-apis.json"
+    apis_file.write_text("[]")
+    catalog._apis_path = lambda: apis_file  # type: ignore[misc]
     try:
         sys.stdin = FakeTTY()
         sys.stdout = FakeTTY()
@@ -134,6 +148,7 @@ def exercise(answer_text):
             __builtins__.input = lambda *a: answer_text
         return ask_endpoint_on_failure(FakeConfig(), running=True)
     finally:
+        catalog._apis_path = real_path  # type: ignore[misc]
         sys.stdin, sys.stdout, sys.stderr = real_stdin, real_stdout, real_stderr
         if isinstance(__builtins__, dict):
             __builtins__["input"] = real_input
@@ -148,18 +163,19 @@ check("a full URL passes through untouched",
       exercise("https://api.example.com/v1") == "https://api.example.com/v1")
 
 # -- the prompt's own answer path persists the default -----------------------
-with TemporaryDirectory() as tmp:
-    apis_file = Path(tmp) / "apis.json"
-    real_path = catalog._apis_path
-    catalog._apis_path = lambda: apis_file  # type: ignore[misc]
-    try:
-        answered = exercise("192.168.99.2:11434")
-        check("the prompt's answer is persisted as the default",
-              answered == "http://192.168.99.2:11434"
-              and catalog.default_api() == "http://192.168.99.2:11434",
-              str(catalog.default_api()))
-    finally:
-        catalog._apis_path = real_path  # type: ignore[misc]
+# exercise() runs against tests/.scratch/exercise-apis.json (never the
+# operator's real file), so the persistence is proven by reading the
+# scratch file back after a run.
+scratch_apis = Path(__file__).parent / ".scratch" / "exercise-apis.json"
+answered = exercise("192.168.99.2:11434")
+import json as _json  # noqa: E402
+
+scratch_records = _json.loads(scratch_apis.read_text())
+check("the prompt's answer is persisted as the default",
+      answered == "http://192.168.99.2:11434"
+      and any(r.get("default") and r["base_url"] == "http://192.168.99.2:11434"
+              for r in scratch_records),
+      str(scratch_records[:1]))
 check("an empty answer returns the original (operator gave up)",
       exercise("") == "http://127.0.0.1:11434/v1")
 
