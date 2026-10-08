@@ -904,6 +904,23 @@ class ChatSession:
             "again to retry."
         )
 
+    def show_image(self, relative_path: str) -> None:
+        """A generated image: forward it to the bound front end, if any.
+
+        The workspace holds this session as ``ui``, so the image tool's
+        lookup lands here -- the hooks decide what showing means: the
+        Textual front end renders pixels, the web sends an image frame,
+        the plain front end names the path. Without this method the
+        model-driven path never rendered anything; only the operator's
+        ``/image`` command did.
+        """
+        show = getattr(self.hooks, "show_image", None)
+        if callable(show):
+            try:
+                show(str(relative_path))
+            except Exception:  # noqa: BLE001 - a render failure must not lose the file
+                pass
+
     # -- introspection ----------------------------------------------------
     def describe(self) -> list[tuple[str, str]]:
         """Rows for a header panel."""

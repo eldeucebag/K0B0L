@@ -210,10 +210,25 @@ ws.onmessage = (ev) => {
     case "flush_think":
       thinkEl = null; break;
     case "tool_call":
+      // A panel ends any open prose/thinking run: later deltas must
+      // create fresh elements so the transcript order matches the frames.
+      proseEl = null; thinkEl = null;
       el("div", "tool call", m.text); scroll(); break;
     case "tool_result":
       const r = el("div", "tool result" + (m.ok ? "" : " error"));
-      r.textContent = m.text; scroll(); break;
+      r.textContent = m.text;
+      proseEl = null; thinkEl = null; scroll(); break;
+    case "code":
+      const cd = document.createElement("details");
+      cd.className = "code";
+      const sum = document.createElement("summary");
+      sum.textContent = m.language || "code";
+      const bd = document.createElement("div"); bd.className = "body";
+      const pre = document.createElement("pre"); pre.className = "code";
+      pre.textContent = m.text;
+      bd.appendChild(pre); cd.appendChild(sum); cd.appendChild(bd);
+      turn.appendChild(cd);
+      proseEl = null; thinkEl = null; scroll(); break;
     case "notice":
       el("div", "notice", m.text); scroll(); break;
     case "error":
@@ -230,7 +245,8 @@ ws.onmessage = (ev) => {
       const cap = document.createElement("figcaption");
       cap.textContent = m.path + (m.label ? " · " + m.label : "");
       fig.appendChild(cap);
-      turn.appendChild(fig); scroll();
+      turn.appendChild(fig);
+      proseEl = null; thinkEl = null; scroll();
       break;
     case "turn_end":
       turn = null; proseEl = null; thinkEl = null;
@@ -272,6 +288,9 @@ class WebChat(ChatUI):
         super().__init__(*args, **kwargs)
         self.socket = socket
         self._loop = asyncio.get_event_loop()
+        #: Fence state for the streaming delta path; see ``delta``.
+        self._fence_open = False
+        self._fence_raw = ""
 
     def _frame(self, payload: dict[str, Any]) -> None:
         frame = json.dumps(payload)
@@ -284,7 +303,41 @@ class WebChat(ChatUI):
         self._frame({"kind": "raw", "text": text})
 
     def delta(self, text: str) -> None:
-        self._frame({"kind": "delta", "text": text})
+        """Stream prose to the page, but hold fenced blocks until they close.
+
+        A streamed tool-call fence is the engine's own plumbing: the ⚙
+        panel already shows the call, and letting the raw JSON reach the
+        page as prose reads as the same call arriving twice (the reported
+        bug). A fence that closes as real code is emitted as a code frame
+        instead. Same rule as the Textual front end's ``_write`` -- applied
+        chunk-by-chunk rather than at turn end, so prose keeps streaming.
+        """
+        rest = text
+        while True:
+            if not self._fence_open:
+                head, fence, rest = rest.partition("```")
+                if head:
+                    self._frame({"kind": "delta", "text": head})
+                if not fence:
+                    return
+                self._fence_open = True
+                self._fence_raw = ""
+            else:
+                body, fence, rest = rest.partition("```")
+                self._fence_raw += body
+                if not fence:
+                    return
+                # The fence closed: tool plumbing is dropped, code renders.
+                raw = self._fence_raw
+                language, _, payload = raw.partition("\n")
+                language = language.strip()
+                if (language not in ("tool", "tool_call")
+                        and not payload.lstrip().startswith('{"name"')):
+                    self._frame({"kind": "code", "language": language,
+                                 "text": (payload if language else raw)
+                                 .strip("\n")})
+                self._fence_open = False
+                self._fence_raw = ""
 
     def thinking(self, text: str) -> None:
         self._frame({"kind": "thinking", "text": text,
@@ -322,9 +375,17 @@ class WebChat(ChatUI):
 
     # -- turn lifecycle: the page keys its turn bookkeeping on these -------
     def turn_start(self, model: str, protocol: str) -> None:
+        self._fence_open = False
+        self._fence_raw = ""
         self._frame({"kind": "assistant"})
 
     def turn_end(self) -> None:
+        if self._fence_open:
+            # An unclosed fence is shown, not swallowed -- a near-miss
+            # block the operator can see beats content that vanished.
+            self._frame({"kind": "delta", "text": "```" + self._fence_raw})
+            self._fence_open = False
+            self._fence_raw = ""
         self._frame({"kind": "turn_end"})
 
     def inference_start(self) -> None:

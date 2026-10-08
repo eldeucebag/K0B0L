@@ -213,7 +213,9 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
         IMAGE_API.rstrip("/") + "/v1/images/generations",
         data=payload, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
+        # 25 minutes: measured 910 s for qwen at 1024x1024 on the 1070; the
+        # old 600 s socket timeout dropped a generation that finished.
+        with urllib.request.urlopen(request, timeout=1500) as response:
             data = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]
@@ -234,6 +236,29 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
 def _slug(text: str, width: int = 24) -> str:
     out = "".join(c if c.isalnum() else "-" for c in text.lower())
     return (out[:width]).strip("-") or "image"
+
+
+def _swap_state() -> dict:
+    """The supervisor's ``/state``, or an empty dict when it cannot answer."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(SWAP_API.rstrip("/") + "/state",
+                                    timeout=2) as r:
+            state = json.loads(r.read())
+            return state if isinstance(state, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _resident_image_model() -> str:
+    """Which model the supervisor says the image service has loaded.
+
+    Empty when the supervisor cannot answer: an unknowable resident is
+    assumed to match rather than paying a reload on a guess.
+    """
+    return str(_swap_state().get("image_model") or "")
 
 
 def gen(model: str, prompt: str, out: str | None, size: str,
@@ -261,10 +286,31 @@ def gen(model: str, prompt: str, out: str | None, size: str,
         else:
             print("the swap supervisor could not start the image service",
                   file=sys.stderr)
+    elif api_up() and swap_available():
+        # sd.cpp serves whichever model is resident, not the one asked
+        # for; the supervisor knows what it loaded (measured: a pony
+        # request answered by a resident qwen ran 910 s). Load the
+        # requested model when they differ, and hand the card back to
+        # the llm afterwards -- the chat is the primary workload.
+        resident = _resident_image_model()
+        if resident and resident != model:
+            print(f"[{model}] image service has {resident!r} resident; "
+                  f"swapping to {model}...", file=sys.stderr)
+            if swap_to_image(model):
+                via_swap = True
+            else:
+                print(f"the swap supervisor could not load {model}; "
+                      f"generating with {resident}", file=sys.stderr)
     if api_up():
         print(f"[{model}] via image api {IMAGE_API}...", file=sys.stderr)
         ok = gen_via_api(model, prompt, out_path, size, steps, seed, neg)
-        if via_swap:
+        # Return the card whenever the supervisor owns it and the llm is
+        # down -- not only when *this* run swapped it over. The incident:
+        # an sd-server left up by an earlier session answered this one,
+        # via_swap stayed False, and nobody gave the card back, so every
+        # later model round hit a dead endpoint.
+        state = _swap_state()
+        if via_swap or (state and not state.get("llm", True)):
             print("swapping the GPU back to the llm service...",
                   file=sys.stderr)
             swap_back_to_llm()
@@ -399,6 +445,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="show what is installed")
+    sub.add_parser("swapback", help="hand the GPU back to the llm service")
     g = sub.add_parser("gen", help="generate one image")
     g.add_argument("model", choices=list(FILES))
     g.add_argument("prompt")
@@ -410,6 +457,13 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "list":
         return list_installed()
+    if args.cmd == "swapback":
+        if not swap_available():
+            print("no swap supervisor answering", file=sys.stderr)
+            return 1
+        swap_back_to_llm()
+        print("swapped back to the llm service")
+        return 0
     return gen(args.model, args.prompt, args.out, args.size,
                args.steps, args.seed, args.neg)
 

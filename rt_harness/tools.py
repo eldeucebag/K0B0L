@@ -779,12 +779,25 @@ class Workspace:
         argv += ["--out", str(out_dir / f"{model}-{int(time.time())}.png")]
         expected_out = argv[argv.index("--out") + 1]
         try:
-            # Ten minutes: qwen/chroma run minutes per image on this GPU.
+            # Thirty minutes. Measured: a qwen 1024x1024 run took 910 s on
+            # this GPU -- the old ten-minute kill fired mid-generation and
+            # took the runner's swap-back with it, stranding the card on
+            # the image service with the llm endpoint dead.
             completed = subprocess.run(  # noqa: S603 - argv list, no shell
-                argv, capture_output=True, text=True, timeout=600)
+                argv, capture_output=True, text=True, timeout=1800)
         except subprocess.TimeoutExpired:
-            return ToolResult(False, "image generation timed out after ten "
-                              "minutes; try fewer steps or the pony model")
+            # The runner owns the swap-back; killed here it never runs, so
+            # ask the supervisor for the card back before reporting. A
+            # hung generation must cost one slow turn, not every later one.
+            try:
+                subprocess.run(  # noqa: S603 - argv list, no shell
+                    [sys.executable, str(runner), "swapback"],
+                    capture_output=True, text=True, timeout=200)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return ToolResult(False, "image generation timed out after 30 "
+                              "minutes; the GPU was handed back to the llm "
+                              "service -- try fewer steps or the pony model")
         except OSError as exc:
             return ToolResult(False, f"could not run the image service: {exc}")
         if completed.returncode != 0:
@@ -812,7 +825,7 @@ class Workspace:
                 show(str(relative))
             except Exception:  # noqa: BLE001 - a UI failure must not lose the file
                 pass
-        return ToolResult(True, f"image saved to images/{relative} "
+        return ToolResult(True, f"image saved to {relative} "
                           f"(shown to the operator); prompt was: "
                           f"{(prompt or '')[:80]}")
 

@@ -24,6 +24,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,15 @@ SD_LOG = "/tmp/sd-server.log"
 LLAMA_URL = "http://127.0.0.1:11434"
 IMAGE_URL = "http://127.0.0.1:7860"
 IMAGE_MODELS = ("pony", "qwen", "chroma")
+
+#: Which image model this supervisor last started; None when the image
+#: service is down or was started out-of-band. Reported by /state so a
+#: client can tell the resident model from the one it asked for.
+current_image_model: str | None = None
+
+#: Swaps are serialized: two concurrent requests must not interleave the
+#: stop/start cycles of two different models.
+_STATE_LOCK = threading.Lock()
 
 
 def healthy(url: str, path: str = "/health") -> bool:
@@ -76,13 +86,16 @@ def stop_llama() -> None:
 
 
 def stop_sd() -> None:
+    global current_image_model
     subprocess.run(["pkill", "-f", "sd-server"], check=False)
     for _ in range(20):
         if not image_healthy():
+            current_image_model = None
             return
         time.sleep(0.5)
     subprocess.run(["pkill", "-9", "-f", "sd-server"], check=False)
     time.sleep(1)
+    current_image_model = None
 
 
 def start_llama() -> None:
@@ -103,6 +116,8 @@ def start_llama() -> None:
 
 
 def start_sd(model: str) -> None:
+    global current_image_model
+    current_image_model = model
     log = open(SD_LOG, "ab")
     subprocess.Popen(
         [str(IMAGE_SERVER), model],
@@ -123,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {
                 "llm": healthy(LLAMA_URL),
                 "image": image_healthy(),
+                "image_model": current_image_model,
                 "image_models": list(IMAGE_MODELS),
             })
         else:
@@ -137,9 +153,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error":
                                  f"model must be one of {IMAGE_MODELS}"})
                 return
-            stop_llama()
-            stop_sd()
-            start_sd(model)
+            with _STATE_LOCK:
+                if image_healthy() and current_image_model == model:
+                    # Already serving the requested model: a reload would
+                    # be a minutes-long no-op on this card.
+                    self._json(200, {"ok": True, "service": "image",
+                                     "model": model, "url": IMAGE_URL})
+                    return
+                stop_llama()
+                stop_sd()
+                start_sd(model)
             deadline = time.time() + 180  # weight load from NTFS is slow
             while time.time() < deadline:
                 if image_healthy():
@@ -152,9 +175,10 @@ class Handler(BaseHTTPRequestHandler):
                              "error": "image server did not come up; "
                                       f"see {SD_LOG}"})
         elif self.path == "/swap/llm":
-            stop_sd()
-            stop_llama()
-            start_llama()
+            with _STATE_LOCK:
+                stop_sd()
+                stop_llama()
+                start_llama()
             deadline = time.time() + 120
             while time.time() < deadline:
                 if healthy(LLAMA_URL):
