@@ -313,6 +313,25 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
   transform: translateX(17px); background: var(--accent-ink);
 }
 #history-dialog { width: min(540px, calc(100vw - 24px)); }
+#image-dialog { width: min(440px, calc(100vw - 24px)); }
+#image-dialog textarea {
+  width: 100%; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font: inherit; resize: vertical;
+}
+#image-dialog input {
+  width: 100%; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font: inherit;
+}
+.img-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.img-grid .opt-label { margin: 10px 0 4px; }
+.opt-faint { color: var(--faint); font-size: 11px; }
+dialog button.primary {
+  background: var(--accent); color: var(--accent-ink);
+  border-color: var(--accent); font-weight: 600;
+}
+dialog button.primary:hover { color: var(--accent-ink); }
 .hist-actions { display: flex; gap: 8px; margin-bottom: 10px; }
 .hist-actions input {
   flex: 1; background: var(--bg); color: var(--ink);
@@ -348,6 +367,7 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
 <header>
   <span class="name">K<b>0</b>B<b>0</b>L</span>
   <span class="meta" id="meta">connecting…</span>
+  <button id="image-btn" class="hbtn" title="generate an image">🎨</button>
   <button id="history-btn" class="hbtn" title="sessions">≡</button>
   <button id="options" class="hbtn" title="options">⚙</button>
 </header>
@@ -358,6 +378,45 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
   <button id="send">send</button>
 </form>
 <div id="overlay" hidden></div>
+<dialog id="image-dialog">
+  <h3>generate an image</h3>
+  <label class="opt-label">model
+    <select id="img-model">
+      <option value="pony">pony — fast, tag-style prompting (SDXL)</option>
+      <option value="qwen">qwen — best prompt adherence, slower</option>
+      <option value="chroma">chroma — Flux-class quality</option>
+    </select>
+  </label>
+  <label class="opt-label">prompt
+    <textarea id="img-prompt" rows="3"
+      placeholder="what to draw"></textarea>
+  </label>
+  <label class="opt-label">negative prompt <span class="opt-faint">(optional)</span>
+    <input id="img-negative" placeholder="what to avoid">
+  </label>
+  <div class="img-grid">
+    <label class="opt-label">size
+      <select id="img-size">
+        <option value="">model default</option>
+        <option value="512x512">512 × 512</option>
+        <option value="768x768">768 × 768</option>
+        <option value="1024x1024" selected>1024 × 1024</option>
+      </select>
+    </label>
+    <label class="opt-label">steps
+      <input id="img-steps" type="number" min="0" max="150"
+        placeholder="model default">
+    </label>
+    <label class="opt-label">seed
+      <input id="img-seed" type="number" min="0"
+        placeholder="random">
+    </label>
+  </div>
+  <div class="opt-actions">
+    <button id="img-cancel">cancel</button>
+    <button id="img-generate" class="primary">generate</button>
+  </div>
+</dialog>
 <dialog id="history-dialog">
   <h3>sessions</h3>
   <div class="hist-actions">
@@ -668,6 +727,22 @@ document.getElementById("form").addEventListener("submit", (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text || send.disabled) return;
+  // A bare "/image" (optionally "<model> <prompt>") opens the image
+  // dialog instead of sending the stripped-down command: the dialog is
+  // the full surface (negative prompt, size, steps, seed).
+  if (text === "/image" || text.startsWith("/image ")) {
+    const rest = text.slice("/image".length).trim();
+    let model = "";
+    let prompt = rest;
+    const first = rest.split(/\s+/)[0];
+    if (["pony", "qwen", "chroma"].includes(first) && rest.includes(" ")) {
+      model = first;
+      prompt = rest.slice(first.length).trim();
+    }
+    input.value = "";
+    openImageDialog({ model: model, prompt: prompt });
+    return;
+  }
   send.disabled = true;
   input.value = "";
   ws.send(JSON.stringify({ text }));
@@ -778,6 +853,47 @@ function renderSessionList(entries) {
     list.appendChild(row);
   }
 }
+
+// -- the image dialog --------------------------------------------------------
+const imageDialog = document.getElementById("image-dialog");
+
+function openImageDialog(prefill) {
+  // prefill: {model, prompt} parsed off a typed "/image ..." line, so
+  // the dialog and the command agree. Fields keep whatever the last
+  // dialog run left unless the typed line replaces them.
+  if (prefill && prefill.prompt) {
+    document.getElementById("img-prompt").value = prefill.prompt;
+  }
+  if (prefill && prefill.model) {
+    document.getElementById("img-model").value = prefill.model;
+  }
+  imageDialog.showModal();
+  document.getElementById("img-prompt").focus();
+}
+
+document.getElementById("image-btn").addEventListener("click",
+  () => openImageDialog(null));
+document.getElementById("img-cancel").addEventListener("click",
+  () => imageDialog.close());
+document.getElementById("img-generate").addEventListener("click", () => {
+  const prompt = document.getElementById("img-prompt").value.trim();
+  if (!prompt) {
+    document.getElementById("img-prompt").focus();
+    return;
+  }
+  const stepsRaw = document.getElementById("img-steps").value;
+  const seedRaw = document.getElementById("img-seed").value;
+  const payload = {
+    model: document.getElementById("img-model").value,
+    prompt: prompt,
+    negative_prompt: document.getElementById("img-negative").value.trim(),
+    size: document.getElementById("img-size").value,
+    steps: stepsRaw ? parseInt(stepsRaw, 10) : 0,
+    seed: seedRaw ? parseInt(seedRaw, 10) : 0,
+  };
+  imageDialog.close();
+  ws.send(JSON.stringify({ image: payload }));
+});
 
 document.getElementById("history-btn").addEventListener("click", openHistory);
 document.getElementById("hist-close").addEventListener("click", () => {
@@ -1222,6 +1338,73 @@ def main() -> int:
                         await websocket.send_json({
                             "kind": "notice", "text": note})
                         continue
+                img = message.get("image")
+                if isinstance(img, dict):
+                    # The image dialog's structured request: the operator
+                    # gets the generate_image tool's whole option surface
+                    # (negative prompt, size, steps, seed), which the
+                    # typed /image command never carried. Runs through the
+                    # session's workspace so the same hooks fire as the
+                    # model-driven path: the progress bar, the image
+                    # frame, the swap chain.
+                    model = str(img.get("model") or "pony").strip().lower()
+                    if model not in ("pony", "qwen", "chroma"):
+                        model = "pony"
+                    prompt = str(img.get("prompt") or "").strip()
+                    if not prompt:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": "image generation needs a prompt"})
+                        continue
+                    args: dict[str, Any] = {"prompt": prompt, "model": model}
+                    negative = str(img.get("negative_prompt") or "").strip()
+                    if negative:
+                        args["negative_prompt"] = negative
+                    size = str(img.get("size") or "").strip()
+                    if size:
+                        args["size"] = size
+                    try:
+                        steps = int(img.get("steps") or 0)
+                    except (TypeError, ValueError):
+                        steps = 0
+                    if steps > 0:
+                        args["steps"] = steps
+                    try:
+                        seed = int(img.get("seed") or 0)
+                    except (TypeError, ValueError):
+                        seed = 0
+                    if seed:
+                        args["seed"] = seed
+                    # Echo like a typed command so the transcript shows
+                    # what was asked for, then hand the GPU work to the
+                    # executor: generation takes minutes and the event
+                    # loop must keep serving frames.
+                    await websocket.send_json({
+                        "kind": "you", "text": f"/image {model} {prompt}"})
+                    await websocket.send_json({"kind": "busy", "on": True})
+
+                    def run_image(args=args):
+                        return ui.session.workspace.call(
+                            "generate_image", args)
+
+                    try:
+                        result = await loop.run_in_executor(
+                            None, run_image)
+                    except Exception as exc:  # noqa: BLE001
+                        await websocket.send_json({
+                            "kind": "error",
+                            "text": f"image generation failed: {exc}"})
+                        result = None
+                    if result is not None:
+                        if result.ok:
+                            await websocket.send_json({
+                                "kind": "raw", "text": result.text})
+                        else:
+                            await websocket.send_json({
+                                "kind": "error", "text": result.text})
+                    await websocket.send_json({"kind": "turn_end"})
+                    await websocket.send_json({"kind": "busy", "on": False})
+                    continue
                 wanted_theme = message.get("theme")
                 if isinstance(wanted_theme, str) and wanted_theme in WEB_THEMES:
                     # The page owns the palette swap client-side; this
@@ -1263,6 +1446,13 @@ def main() -> int:
                         # below a conversation the model no longer holds.
                         await websocket.send_json({"kind": "clear"})
                     await websocket.send_json({"kind": "turn_end"})
+                    # Slash commands can change the live session (/clear,
+                    # /session load, /model): keep the autosave slot in
+                    # sync, or a reconnect restores a stale conversation.
+                    try:
+                        sessions.save(SessionManager.AUTOSAVE)
+                    except Exception:  # noqa: BLE001 - persistence is best-effort
+                        pass
                     continue
                 await websocket.send_json({"kind": "you", "text": text})
                 # The GPU is one card shared with image generation. After an
