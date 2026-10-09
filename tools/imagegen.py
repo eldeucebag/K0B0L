@@ -235,26 +235,41 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
 
         def run() -> None:
             last_change = time.time()
+            seen_steps = False
             while not state["done"]:
                 progress = swap_progress()
+                if progress:
+                    seen_steps = True
                 if progress != state["progress"]:
                     state["progress"] = progress
                     last_change = time.time()
                     if progress:
                         print(f"PROGRESS {progress['step']}/{progress['total']}",
                               file=sys.stderr, flush=True)
-                if progress:
-                    phase = f"sampling {progress['step']}/{progress['total']}"
-                    # sd.cpp block-buffers its per-step updates and the
-                    # VAE decode after the last step writes no n/m lines,
-                    # so a still bar is usually "almost done", not "dead".
-                    if time.time() - last_change > 45:
-                        phase = "finalizing (VAE decode / save)"
+                # Phases only for states the steps cannot express: the
+                # label before the first step, the verdict when the steps
+                # stop. A phase per step double-emits on the wire and the
+                # total=0 frame flips the page's bar back to indeterminate
+                # after every step -- a bar that flickers instead of fills.
+                if progress and time.time() - last_change > 45:
+                    # sd.cpp block-buffers its per-step updates: a still
+                    # bar is usually "almost done", not "dead".
+                    phase = "finalizing (VAE decode / save)"
+                elif progress:
+                    phase = None
+                elif seen_steps:
+                    # Steps ran, then the progress went away: the
+                    # completion marker, between the last step and the
+                    # HTTP response. Not "preparing" -- that would be a
+                    # lie told at the one moment the operator is
+                    # watching hardest.
+                    phase = "finalizing (VAE decode / save)"
                 else:
                     phase = "preparing (loading / text-encoding)"
                 if phase != state["phase"]:
                     state["phase"] = phase
-                    print(f"PHASE {phase}", file=sys.stderr, flush=True)
+                    if phase:
+                        print(f"PHASE {phase}", file=sys.stderr, flush=True)
                 time.sleep(2)
 
         threading.Thread(target=run, daemon=True).start()

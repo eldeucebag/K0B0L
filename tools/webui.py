@@ -412,7 +412,15 @@ function newTurn() {
   turn.className = "turn";
   transcript.appendChild(turn);
 }
+function ensureTurn() {
+  // Slash commands and late frames can arrive with no open turn (the
+  // server sends no "assistant" row for /image, and a notice can land
+  // after turn_end). Rendering into a null turn throws and silently
+  // kills every later frame in the batch -- the "stalled" webui.
+  if (!turn) newTurn();
+}
 function who(name, cls) {
+  ensureTurn();
   const el = document.createElement("div");
   el.className = "who " + (cls || "");
   el.textContent = name;
@@ -423,6 +431,7 @@ function scroll() {
   transcript.scrollTop = transcript.scrollHeight;
 }
 function el(tag, cls, text) {
+  ensureTurn();
   const e = document.createElement(tag);
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
@@ -487,6 +496,7 @@ ws.onmessage = (ev) => {
       r.textContent = m.text;
       proseEl = null; thinkEl = null; scroll(); break;
     case "code":
+      ensureTurn();
       const cd = document.createElement("details");
       cd.className = "code";
       const sum = document.createElement("summary");
@@ -504,6 +514,7 @@ ws.onmessage = (ev) => {
     case "status":
       el("div", "statusline", m.text); scroll(); break;
     case "image":
+      ensureTurn();
       const fig = document.createElement("figure");
       const img = document.createElement("img");
       img.className = "gen";
@@ -519,6 +530,7 @@ ws.onmessage = (ev) => {
       scroll();
       break;
     case "gen_progress":
+      ensureTurn();
       if (!genBar) {
         const wrap = document.createElement("div");
         wrap.className = "genbar-wrap";
@@ -824,10 +836,17 @@ def main() -> int:
                 if not text:
                     continue
                 if text.startswith("/"):
+                    # Echo the command as the user's row: a slash command
+                    # is still a thing the operator typed, and without the
+                    # row the whole turn (bar, result, image) renders in an
+                    # unlabeled block -- or, before the page grew
+                    # ensureTurn, crashed the handler on a null turn.
+                    await websocket.send_json({"kind": "you", "text": text})
                     if text in ("/exit", "/quit", "/q"):
                         await websocket.send_json(
                             {"kind": "notice", "text": "the web session "
                              "stays; just close the tab"})
+                        await websocket.send_json({"kind": "turn_end"})
                         continue
                     handled = await loop.run_in_executor(
                         None, ui.dispatch, text)

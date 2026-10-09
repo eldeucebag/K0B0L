@@ -75,11 +75,22 @@ _STATE_LOCK = threading.Lock()
 #: load lines say MB/s, so requiring s/it tells the two apart.
 _PROGRESS_RE = re.compile(r"(\d+)/(\d+)\s*-\s*[\d.]+s/it")
 
+#: The line sd.cpp writes when a generation is DONE. Seeing it means the
+#: last step is no longer live progress -- without this check a *new*
+#: run opens with the previous run's final step as a phantom full bar.
+_SD_DONE_RE = re.compile(r"generate_image completed in")
+
 #: Forward-only scan state for the sd-server log: bytes already read, and
 #: the freshest step seen among them. ``pos`` of None means not yet
 #: baselined -- the first read skips to the file's end, because history
 #: from before the supervisor started watching is not progress.
 _SD_SCAN: dict = {"pos": None, "last": None}
+
+
+def _reset_sd_scan() -> None:
+    """Forget everything watched so far (a new image run is starting)."""
+    _SD_SCAN["pos"] = None
+    _SD_SCAN["last"] = None
 
 
 def read_sd_progress() -> dict | None:
@@ -111,6 +122,10 @@ def read_sd_progress() -> dict | None:
     last = None
     for match in _PROGRESS_RE.finditer(chunk):
         last = match
+    if _SD_DONE_RE.search(chunk):
+        # The run finished: its last step is history, not live progress.
+        _SD_SCAN["last"] = None
+        return None
     if last is not None:
         step, total = int(last.group(1)), int(last.group(2))
         if 0 < step <= total < 100_000:
@@ -231,6 +246,7 @@ class Handler(BaseHTTPRequestHandler):
                                  f"model must be one of {IMAGE_MODELS}"})
                 return
             with _STATE_LOCK:
+                _reset_sd_scan()  # a new run: no phantom steps from the last one
                 if image_healthy() and current_image_model == model:
                     # Already serving the requested model: a reload would
                     # be a minutes-long no-op on this card.
