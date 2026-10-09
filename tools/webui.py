@@ -671,7 +671,12 @@ function persistCache() {
           prose.push(child.textContent || "");
         }
       }
-      rows.push({ you: !!you, text: prose.join("\n") });
+      // `\\n` inside this file's PAGE string is consumed by *Python* at
+    // page-build time -- the browser would receive a raw newline inside
+    // a string literal, a SyntaxError that killed the entire script
+    // (every handler, every button). A charCode carries no backslash,
+    // so the page survives the Python string intact.
+    rows.push({ you: !!you, text: prose.join(String.fromCharCode(10)) });
     }
     localStorage.setItem(CACHE_KEY, JSON.stringify(rows));
   } catch (err) { /* storage full or blocked: the server is the truth */ }
