@@ -289,6 +289,35 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
 .switch input:checked + span::before {
   transform: translateX(17px); background: var(--accent-ink);
 }
+#history-dialog { min-width: 420px; max-width: 560px; }
+.hist-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+.hist-actions input {
+  flex: 1; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font: inherit;
+}
+.hist-list { display: grid; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.sess-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--band); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
+.sess-row .sess-main { flex: 1; min-width: 0; }
+.sess-row .sess-name {
+  font-family: var(--mono); font-size: 13px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sess-row .sess-sub {
+  font-size: 11.5px; color: var(--faint); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sess-row button {
+  background: none; border: 0; cursor: pointer; color: var(--muted);
+  font-size: 12px; padding: 4px 8px; border-radius: 6px;
+}
+.sess-row button:hover { color: var(--accent); }
+.sess-row button.danger:hover { color: var(--err); }
+.sess-empty { color: var(--faint); font-size: 13px; padding: 8px; }
 @media (max-width: 640px) { header .meta { display: none; } }
 </style>
 </head>
@@ -296,6 +325,7 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
 <header>
   <span class="name">K<b>0</b>B<b>0</b>L</span>
   <span class="meta" id="meta">connecting…</span>
+  <button id="history-btn" class="hbtn" title="sessions">≡</button>
   <button id="options" class="hbtn" title="options">⚙</button>
 </header>
 <main id="transcript" aria-live="polite"></main>
@@ -305,6 +335,17 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
   <button id="send">send</button>
 </form>
 <div id="overlay" hidden></div>
+<dialog id="history-dialog">
+  <h3>sessions</h3>
+  <div class="hist-actions">
+    <input id="hist-name" placeholder="name to save as" maxlength="60">
+    <button id="hist-save">save current</button>
+  </div>
+  <div id="hist-list" class="hist-list"></div>
+  <div class="opt-actions">
+    <button id="hist-close">close</button>
+  </div>
+</dialog>
 <dialog id="options-dialog">
   <h3>options</h3>
   <label class="opt-label">theme
@@ -563,6 +604,28 @@ ws.onmessage = (ev) => {
       turn = null; proseEl = null; thinkEl = null;
       whoEl = null; typingEl = null;
       send.disabled = false; input.focus();
+      persistCache();
+      break;
+    case "restore_begin":
+      // Server truth incoming: drop the localStorage guess so the
+      // restored transcript is painted exactly once.
+      restoring = true;
+      transcript.innerHTML = "";
+      turn = null; proseEl = null; thinkEl = null;
+      whoEl = null; typingEl = null; genBar = null; genLabel = null;
+      break;
+    case "restore_end":
+      restoring = false;
+      persistCache();
+      break;
+    case "clear":
+      transcript.innerHTML = "";
+      turn = null; proseEl = null; thinkEl = null;
+      whoEl = null; typingEl = null; genBar = null; genLabel = null;
+      try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
+      break;
+    case "session_list":
+      renderSessionList(m.sessions || []);
       break;
     case "raw":
       // unhandled line kinds (slash-command output) render as muted prose
@@ -587,7 +650,126 @@ document.getElementById("form").addEventListener("submit", (e) => {
   ws.send(JSON.stringify({ text }));
 });
 
-// -- the options dialog ---------------------------------------------------
+// -- session tracking (client cache + management panel) -------------------
+const CACHE_KEY = "k0b0l-webui-cache-v1";
+let restoring = false;
+
+function persistCache() {
+  // A best-effort local copy of the transcript: the page paints
+  // instantly on reload while the server catches up, and a dead
+  // server still shows the conversation. Never fatal. Suppressed while
+  // a server restore repaints the page -- the guess must not
+  // overwrite the truth mid-repaint.
+  if (restoring) return;
+  try {
+    const rows = [];
+    for (const t of transcript.children) {
+      const you = t.querySelector && t.querySelector(".who.you");
+      const prose = [];
+      for (const child of t.children) {
+        if (String(child.className || "").includes("prose")) {
+          prose.push(child.textContent || "");
+        }
+      }
+      rows.push({ you: !!you, text: prose.join("\n") });
+    }
+    localStorage.setItem(CACHE_KEY, JSON.stringify(rows));
+  } catch (err) { /* storage full or blocked: the server is the truth */ }
+}
+
+function restoreCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return false;
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows) || !rows.length) return false;
+    for (const row of rows) {
+      newTurn();
+      if (row.you) {
+        who("you", "you");
+        proseEl = el("div", "prose");
+        proseEl.textContent = row.text;
+      } else {
+        who("model");
+        proseEl = el("div", "prose");
+        proseEl.textContent = row.text;
+      }
+    }
+    turn = null; proseEl = null; thinkEl = null;
+    return true;
+  } catch (err) { return false; }
+}
+
+function openHistory() {
+  document.getElementById("history-dialog").showModal();
+  ws.send(JSON.stringify({ session: { verb: "list" } }));
+}
+
+function renderSessionList(entries) {
+  const list = document.getElementById("hist-list");
+  list.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "sess-empty";
+    empty.textContent = "no saved sessions yet";
+    list.appendChild(empty);
+    return;
+  }
+  for (const s of entries) {
+    const row = document.createElement("div");
+    row.className = "sess-row";
+    const main = document.createElement("div");
+    main.className = "sess-main";
+    const nameEl = document.createElement("div");
+    nameEl.className = "sess-name";
+    nameEl.textContent = s.name;
+    const sub = document.createElement("div");
+    sub.className = "sess-sub";
+    const when = s.mtime ? new Date(s.mtime * 1000).toLocaleString() : "";
+    sub.textContent = (s.turns || 0) + " turns · " +
+      (s.messages || 0) + " msgs · " + when +
+      (s.preview ? " · " + s.preview : "");
+    main.appendChild(nameEl); main.appendChild(sub);
+    row.appendChild(main);
+    const loadBtn = document.createElement("button");
+    loadBtn.textContent = "load";
+    loadBtn.addEventListener("click", () => {
+      ws.send(JSON.stringify({ session: { verb: "load", name: s.name } }));
+    });
+    row.appendChild(loadBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "danger";
+    delBtn.textContent = "✕";
+    delBtn.title = "delete";
+    delBtn.addEventListener("click", () => {
+      ws.send(JSON.stringify({ session: { verb: "delete", name: s.name } }));
+      setTimeout(() => ws.send(JSON.stringify(
+        { session: { verb: "list" } })), 200);
+    });
+    row.appendChild(delBtn);
+    list.appendChild(row);
+  }
+}
+
+document.getElementById("history-btn").addEventListener("click", openHistory);
+document.getElementById("hist-close").addEventListener("click", () => {
+  document.getElementById("history-dialog").close();
+});
+document.getElementById("hist-save").addEventListener("click", () => {
+  const box = document.getElementById("hist-name");
+  ws.send(JSON.stringify({ session: { verb: "save",
+    name: box.value.trim() || "web-session" } }));
+  box.value = "";
+  setTimeout(() => ws.send(JSON.stringify({ session: { verb: "list" } })),
+    200);
+});
+
+// Paint the cached copy immediately; the server's restored history
+// clears and repaints it when the socket connects. The cache is the
+// page's instant-paint guess at the last conversation -- the server's
+// restore frames are the truth that replace it.
+restoreCache();
+
 const dialog = document.getElementById("options-dialog");
 const themeSel = document.getElementById("opt-theme");
 const modelSel = document.getElementById("opt-model");
@@ -754,6 +936,60 @@ class WebChat(ChatUI):
             self._fence_raw = ""
         self._frame({"kind": "turn_end"})
 
+    # -- history repaint: a loaded session replays through the normal ------
+    # -- handlers, so a restored transcript is visually identical ----------
+    def send_history(self, messages: list[dict[str, Any]]) -> None:
+        """Repaint stored messages as frames through the page's handlers."""
+        import re as _re
+
+        fence_re = _re.compile(r"```tool\n(\{.*?\})\n```", _re.DOTALL)
+        for message in messages:
+            role = message.get("role")
+            if role == "user":
+                body = str(message.get("content", ""))
+                if body.startswith("TOOL RESULT for"):
+                    head, _, rest = body.partition("\n")
+                    name = head.replace("TOOL RESULT for ", "")
+                    self._frame({"kind": "tool_result", "ok": True,
+                                 "text": rest.strip()[:800]})
+                    continue
+                self._frame({"kind": "you", "text": body})
+            elif role == "assistant":
+                self._frame({"kind": "assistant"})
+                body = str(message.get("content", ""))
+                calls = message.get("tool_calls") or []
+                for call in calls:
+                    function = call.get("function") or {}
+                    self._frame({"kind": "tool_call",
+                                 "text": summarize_call(
+                                     str(function.get("name", "")),
+                                     function.get("arguments") or {})})
+                shown = fence_re.sub("", body).strip()
+                if shown:
+                    self._frame({"kind": "delta", "text": shown})
+                self._frame({"kind": "turn_end"})
+            elif role == "tool":
+                # native-protocol results: role "tool" carries the
+                # "name -> ok/error" summary plus the body
+                body = str(message.get("content", ""))
+                head, _, rest = body.partition("\n")
+                self._frame({"kind": "tool_result", "ok": True,
+                             "text": rest.strip()[:800]})
+        # Images the conversation generated: anything still on disk from
+        # this workspace is offered, newest first, after the messages.
+        try:
+            images = sorted(
+                (self.ui_session_root() / "images").glob("*.png"),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            images = []
+        for path in images[:20]:
+            self._frame({"kind": "image",
+                         "path": f"images/{path.name}"})
+
+    def ui_session_root(self) -> Path:
+        return self.session.workspace.root
+
     def inference_start(self) -> None:
         self._frame({"kind": "busy", "on": True})
 
@@ -767,6 +1003,91 @@ class WebChat(ChatUI):
         for key, value in self.session.describe():
             self.line(f"{key:>10}: {value}")
         self.line("type /help for commands; the web front end adds none")
+
+
+class SessionManager:
+    """Named chat sessions over the engine's ``~/.k0b0l-sessions`` store.
+
+    The web front end keeps one unnamed slot per browser tab (autosaved
+    after every completed turn, restored on connect) and lets the
+    operator additionally save under explicit names -- the same files
+    the TUI's /session commands use, so the two front ends share one
+    session universe.
+    """
+
+    #: The autosave slot every web tab restores from on connect. A
+    #: shared slot on purpose: "restore last session" means the last
+    #: conversation, whichever tab or TUI run had it.
+    AUTOSAVE = "__webui_last__"
+
+    def __init__(self, ui: "WebChat") -> None:
+        self.ui = ui
+        from rt_harness.infotools import _session_dir
+
+        self.dir = _session_dir()
+
+    def save(self, name: str) -> str:
+        import json
+
+        path = self.dir / f"{name}.json"
+        payload = {"messages": self.ui.session.messages}
+        path.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        return f"session saved to {path.name}"
+
+    def load(self, name: str) -> tuple[bool, str]:
+        import json
+
+        path = self.dir / f"{name}.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False, f"no session named {name!r}"
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return False, f"session {name!r} is empty or unreadable"
+        self.ui.session.messages[:] = messages
+        self.ui.session.turns = sum(
+            1 for m in messages if m.get("role") == "user")
+        self.ui.session.tool_calls_made = sum(
+            len((m.get("tool_calls") or [])) for m in messages)
+        return True, f"session {name!r} loaded ({len(messages)} messages)"
+
+    def delete(self, name: str) -> tuple[bool, str]:
+        path = self.dir / f"{name}.json"
+        if not path.is_file():
+            return False, f"no session named {name!r}"
+        path.unlink()
+        return True, f"session {name!r} deleted"
+
+    def listing(self) -> list[dict[str, Any]]:
+        """Every stored session with meta for a picker: newest first."""
+        rows: list[dict[str, Any]] = []
+        try:
+            paths = sorted(self.dir.glob("*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return rows
+        for path in paths:
+            row: dict[str, Any] = {"name": path.stem,
+                                   "mtime": path.stat().st_mtime}
+            try:
+                import json
+
+                data = json.loads(path.read_text(encoding="utf-8"))
+                messages = data.get("messages") or []
+                row["messages"] = len(messages)
+                row["turns"] = sum(1 for m in messages
+                                   if m.get("role") == "user")
+                first_user = next((str(m.get("content", ""))[:60]
+                                   for m in messages
+                                   if m.get("role") == "user"), "")
+                row["preview"] = first_user
+            except (OSError, ValueError, AttributeError):
+                row["messages"] = 0
+                row["preview"] = "(unreadable)"
+            rows.append(row)
+        return rows
 
 
 # -- the server --------------------------------------------------------------
@@ -808,16 +1129,71 @@ def main() -> int:
         ui = WebChat(websocket, client, config,
                      tool_output=chat_config.tool_output,
                      show_thinking=config.show_thinking)
+        sessions = SessionManager(ui)
+        # Restore the last session: the web's contract is that a refresh
+        # or a reopened tab continues where the last conversation left
+        # off. Fails soft -- an empty or unreadable autosave just means
+        # a fresh chat.
+        restored = False
+        try:
+            ok, _ = sessions.load(SessionManager.AUTOSAVE)
+            restored = ok
+        except Exception:  # noqa: BLE001 - a bad file is a fresh chat
+            restored = False
         await websocket.send_json({
             "kind": "meta", "model": chat_config.model,
             "protocol": ui.session.protocol,
             "num_ctx": chat_config.num_ctx,
             "theme": saved_theme or "k0b0l-dark",
+            "restored": restored,
         })
+        if restored:
+            # Through ui._frame with the history frames, then a flush:
+            # direct send_json raced the queued frames and closed the
+            # bracket before the replay painted.
+            ui._frame({"kind": "restore_begin"})
+            ui.send_history(ui.session.messages)
+            ui._frame({"kind": "restore_end"})
+            await asyncio.sleep(0.2)
         loop = asyncio.get_event_loop()
         try:
             while True:
                 message = await websocket.receive_json()
+                # -- session control messages first: they carry no "text",
+                # so the empty-text guard below must never swallow them
+                # (it did, and every panel button silently died).
+                op = message.get("session")
+                if isinstance(op, dict):
+                    verb = str(op.get("verb", ""))
+                    name = str(op.get("name", "")).strip()
+                    if verb == "list":
+                        await websocket.send_json({
+                            "kind": "session_list",
+                            "sessions": sessions.listing()})
+                        continue
+                    if verb == "load":
+                        ok, note = sessions.load(name)
+                        # All through ui._frame, the same FIFO the history
+                        # frames use: a direct send_json raced the queued
+                        # frames and closed the bracket before the replay.
+                        ui._frame({"kind": "restore_begin"})
+                        if ok:
+                            ui.send_history(ui.session.messages)
+                        ui._frame({"kind": "notice", "text": note})
+                        ui._frame({"kind": "restore_end"})
+                        sessions.save(SessionManager.AUTOSAVE)
+                        await asyncio.sleep(0.2)  # let the queue flush
+                        continue
+                    if verb == "save":
+                        note = sessions.save(name or "web-session")
+                        await websocket.send_json({
+                            "kind": "notice", "text": note})
+                        continue
+                    if verb == "delete":
+                        ok, note = sessions.delete(name)
+                        await websocket.send_json({
+                            "kind": "notice", "text": note})
+                        continue
                 wanted_theme = message.get("theme")
                 if isinstance(wanted_theme, str) and wanted_theme in WEB_THEMES:
                     # The page owns the palette swap client-side; this
@@ -853,6 +1229,11 @@ def main() -> int:
                     if not handled:
                         await websocket.send_json(
                             {"kind": "raw", "text": text})
+                    if text.split()[0].lower() in ("/clear",):
+                        # The session was reset server-side; the page's
+                        # transcript must follow or the next turn paints
+                        # below a conversation the model no longer holds.
+                        await websocket.send_json({"kind": "clear"})
                     await websocket.send_json({"kind": "turn_end"})
                     continue
                 await websocket.send_json({"kind": "you", "text": text})
@@ -910,6 +1291,13 @@ def main() -> int:
                                     "this can take a minute)"})
                         break
                 await loop.run_in_executor(None, ui.ask, text)
+                # Autosave after every completed turn: "restore last
+                # session" must mean the conversation as it stands, not
+                # as it stood when the operator last remembered to save.
+                try:
+                    sessions.save(SessionManager.AUTOSAVE)
+                except Exception:  # noqa: BLE001 - persistence is best-effort
+                    pass
         except WebSocketDisconnect:
             pass
         finally:
