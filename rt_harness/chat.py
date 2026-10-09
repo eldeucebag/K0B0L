@@ -86,6 +86,15 @@ class ChatHooks:
     def notice(self, text: str) -> None:
         """Non-fatal status: truncation, a rejected edit, a dropped call."""
 
+    def gen_progress(self, phase: str, step: int, total: int) -> None:
+        """Image generation moved: a phase, or a sampling step.
+
+        Fires from the image tool while its runner works; ``total`` is 0
+        for a phase with no natural denominator (loading, encoding).
+        Front ends decide what showing means -- the web renders a live
+        progress bar, the TUI a status line.
+        """
+
     def error(self, text: str) -> None:
         """A turn failed. The session stays usable."""
         self.line(f"  ! {text}")
@@ -919,6 +928,20 @@ class ChatSession:
             try:
                 show(str(relative_path))
             except Exception:  # noqa: BLE001 - a render failure must not lose the file
+                pass
+
+    def gen_progress(self, phase: str, step: int = 0, total: int = 0) -> None:
+        """Forward generation progress to the bound front end, if any.
+
+        The image tool emits it as its runner reports; the session is the
+        tool's ``_ui``, so the forward lands here the same way
+        ``show_image`` does.
+        """
+        forward = getattr(self.hooks, "gen_progress", None)
+        if callable(forward):
+            try:
+                forward(str(phase), int(step), int(total))
+            except Exception:  # noqa: BLE001 - progress must never fail a turn
                 pass
 
     # -- introspection ----------------------------------------------------

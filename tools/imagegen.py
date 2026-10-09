@@ -114,11 +114,25 @@ def _derive_from_endpoint(env_name: str, port: int) -> str:
 #: when no server answers.
 IMAGE_API = _derive_from_endpoint("K0B0L_IMAGE_API", 7860)
 
-#: The GPU-box swap supervisor (tools/gpu_swap_server.py): owns llama
-#: and sd-server on the one card, swapping them on request. When the
+#: The swap supervisor (tools/gpu_swap_server.py): owns llama and
+#: sd-server on the one card, swapping them on request. When the
 #: image API is down but this answers, the client swaps, generates, and
 #: swaps back -- the load/unload you'd otherwise do by hand.
 SWAP_API = _derive_from_endpoint("K0B0L_SWAP_API", 7861)
+
+
+def swap_progress() -> dict | None:
+    """Live sampling progress from the supervisor, or None."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(SWAP_API.rstrip("/") + "/progress",
+                                    timeout=2) as r:
+            progress = json.loads(r.read()).get("progress")
+            return progress if isinstance(progress, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def api_up(url: str = "") -> bool:
@@ -209,12 +223,51 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
         "size": size,
         "output_format": "png",
     }).encode()
+    # Sample while the request is open: sd.cpp streams no progress over
+    # HTTP, so the supervisor's /progress (the sd-server's log) is polled
+    # on a daemon thread and the freshest state is printed as PROGRESS /
+    # PHASE markers for the harness's stream reader to pick up. A missing
+    # supervisor means no markers -- generation just runs uninstrumented.
+    state: dict = {"progress": None, "phase": None}
+
+    def _poll() -> None:
+        import threading
+
+        def run() -> None:
+            last_change = time.time()
+            while not state["done"]:
+                progress = swap_progress()
+                if progress != state["progress"]:
+                    state["progress"] = progress
+                    last_change = time.time()
+                    if progress:
+                        print(f"PROGRESS {progress['step']}/{progress['total']}",
+                              file=sys.stderr, flush=True)
+                if progress:
+                    phase = f"sampling {progress['step']}/{progress['total']}"
+                    # sd.cpp block-buffers its per-step updates and the
+                    # VAE decode after the last step writes no n/m lines,
+                    # so a still bar is usually "almost done", not "dead".
+                    if time.time() - last_change > 45:
+                        phase = "finalizing (VAE decode / save)"
+                else:
+                    phase = "preparing (loading / text-encoding)"
+                if phase != state["phase"]:
+                    state["phase"] = phase
+                    print(f"PHASE {phase}", file=sys.stderr, flush=True)
+                time.sleep(2)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    state["done"] = False
+    if swap_available():
+        _poll()
     request = urllib.request.Request(
         IMAGE_API.rstrip("/") + "/v1/images/generations",
         data=payload, headers={"Content-Type": "application/json"})
     try:
-        # 25 minutes: measured 910 s for qwen at 1024x1024 on the 1070; the
-        # old 600 s socket timeout dropped a generation that finished.
+        # 25 minutes: measured 910 s for qwen at 1024x1024 on the 1070;
+        # the old 600 s socket timeout dropped a generation that finished.
         with urllib.request.urlopen(request, timeout=1500) as response:
             data = json.loads(response.read())
     except urllib.error.HTTPError as exc:
@@ -224,6 +277,8 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
     except Exception as exc:  # noqa: BLE001
         print(f"image api unreachable: {exc}", file=sys.stderr)
         return False
+    finally:
+        state["done"] = True
     rows = data.get("data") or []
     if not rows or not rows[0].get("b64_json"):
         print("image api returned no image data", file=sys.stderr)

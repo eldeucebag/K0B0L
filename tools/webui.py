@@ -35,6 +35,71 @@ from rt_harness.client import OllamaError  # noqa: E402
 
 PORT = 8321
 
+# -- themes: the six retro palettes, ported from rt_harness.themes -----------
+# Values are copied from RETRO_THEMES so the page needs no runtime import
+# of the Textual stack; themes.py remains the source of truth -- keep the
+# numbers in sync when a palette changes there.
+
+WEB_THEMES: dict[str, dict[str, str]] = {
+    "hotdog-3x": {
+        "--bg": "#A80000", "--surface": "#8E0000", "--band": "#5C0000",
+        "--ink": "#FFFF00", "--muted": "#FFCC00", "--faint": "#CC9900",
+        "--accent": "#FFB000", "--accent-ink": "#000000",
+        "--code-bg": "#000000", "--think-bg": "#5C0000",
+        "--warn": "#FF8C00", "--err": "#FF2D2D", "--border": "#FFFF00",
+    },
+    "beos": {
+        "--bg": "#D6D3CE", "--surface": "#C9C5BE", "--band": "#C9C5BE",
+        "--ink": "#101010", "--muted": "#4A4640", "--faint": "#8A867E",
+        "--accent": "#1A1AB8", "--accent-ink": "#FFFFFF",
+        "--code-bg": "#FFFFFF", "--think-bg": "#C9C5BE",
+        "--warn": "#A08000", "--err": "#C00000", "--border": "#8A867E",
+    },
+    "commodore-64": {
+        "--bg": "#352879", "--surface": "#2A1F60", "--band": "#241A52",
+        "--ink": "#A6A0F0", "--muted": "#9B93E8", "--faint": "#6C5EB5",
+        "--accent": "#B8C76F", "--accent-ink": "#352879",
+        "--code-bg": "#1B1240", "--think-bg": "#241A52",
+        "--warn": "#B8C76F", "--err": "#9A6759", "--border": "#6C5EB5",
+    },
+    "edit-com": {
+        "--bg": "#0000AA", "--surface": "#000088", "--band": "#000066",
+        "--ink": "#AAAAAA", "--muted": "#767676", "--faint": "#545454",
+        "--accent": "#FFFF55", "--accent-ink": "#0000AA",
+        "--code-bg": "#000044", "--think-bg": "#000066",
+        "--warn": "#FFFF55", "--err": "#FF5555", "--border": "#00AAAA",
+    },
+    "amber": {
+        "--bg": "#000000", "--surface": "#140D00", "--band": "#2B1D00",
+        "--ink": "#FFB000", "--muted": "#FFC46B", "--faint": "#8A5F00",
+        "--accent": "#FFD9A0", "--accent-ink": "#000000",
+        "--code-bg": "#140D00", "--think-bg": "#2B1D00",
+        "--warn": "#E8A200", "--err": "#FF7A00", "--border": "#8A5F00",
+    },
+    "matrix": {
+        "--bg": "#000000", "--surface": "#001A0A", "--band": "#003B00",
+        "--ink": "#00FF41", "--muted": "#7CFF9B", "--faint": "#008F11",
+        "--accent": "#7CFF9B", "--accent-ink": "#000000",
+        "--code-bg": "#001A0A", "--think-bg": "#003B00",
+        "--warn": "#B6FF00", "--err": "#FF3B3B", "--border": "#008F11",
+    },
+}
+
+#: The default (original) palette, applied when no saved theme matches.
+DEFAULT_THEME = {
+    "--bg": "#0a0e14", "--surface": "#11151d", "--band": "#161b26",
+    "--ink": "#e6e9ef", "--muted": "#8b93a3", "--faint": "#5c6474",
+    "--accent": "#62e2c6", "--accent-ink": "#062a22",
+    "--code-bg": "#131722", "--think-bg": "#12141c",
+    "--warn": "#e2b962", "--err": "#e2627a", "--border": "#1d2330",
+}
+
+#: The web's own default sits in the table too, so selecting it is a real
+#: choice the server accepts -- without this, switching away from the
+#: default was a one-way door and the prefs file kept the last theme
+#: forever. The TUI ignores it (not in its list) and uses its own default.
+WEB_THEMES["k0b0l-dark"] = dict(DEFAULT_THEME)
+
 # -- the page (self-contained; theme tokens ported from the harness) -------
 
 PAGE = """<!DOCTYPE html>
@@ -132,6 +197,85 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   border-radius: 8px; padding: 0 20px; font-weight: 600; cursor: pointer;
 }
 #send:disabled { opacity: 0.4; cursor: default; }
+.hbtn {
+  margin-left: auto; background: none; border: 1px solid var(--border);
+  color: var(--muted); border-radius: 8px; width: 30px; height: 26px;
+  cursor: pointer; font-size: 14px; line-height: 1;
+}
+.hbtn:hover { color: var(--accent); border-color: var(--accent); }
+.genbar-wrap {
+  margin: 2px 0 6px; display: grid; gap: 4px;
+}
+.genbar-label {
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+}
+.genbar {
+  height: 10px; border-radius: 5px; background: var(--band);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.genbar > .fill {
+  height: 100%; width: 0%; background: var(--accent);
+  transition: width 0.5s ease; border-radius: 5px;
+}
+.genbar.indeterminate > .fill {
+  width: 30%;
+  animation: genpulse 1.2s ease-in-out infinite alternate;
+}
+@keyframes genpulse {
+  from { margin-left: 0; width: 12%; }
+  to { margin-left: 70%; width: 22%; }
+}
+#overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40;
+}
+dialog {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 24px; min-width: 320px; z-index: 50; margin: 0;
+  font: inherit;
+}
+dialog::backdrop { background: rgba(0,0,0,0.5); }
+dialog h3 {
+  margin: 0 0 14px; font-size: 13px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted);
+}
+dialog label.opt-label {
+  display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px;
+}
+dialog .opt-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 10px 0;
+}
+dialog .opt-row .opt-label { margin: 0; }
+dialog select {
+  width: 100%; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 8px; font: inherit;
+}
+dialog .opt-actions {
+  display: flex; gap: 10px; margin-top: 18px; justify-content: flex-end;
+}
+dialog button {
+  background: var(--band); color: var(--ink); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 14px; cursor: pointer; font: inherit;
+}
+dialog button:hover { border-color: var(--accent); color: var(--accent); }
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span {
+  position: absolute; inset: 0; background: var(--band);
+  border: 1px solid var(--border); border-radius: 12px; transition: 0.2s;
+}
+.switch span::before {
+  content: ""; position: absolute; height: 14px; width: 14px;
+  left: 3px; top: 3px; background: var(--muted); border-radius: 50%;
+  transition: 0.2s;
+}
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::before {
+  transform: translateX(17px); background: var(--accent-ink);
+}
 @media (max-width: 640px) { header .meta { display: none; } }
 </style>
 </head>
@@ -139,6 +283,7 @@ form { display: flex; gap: 10px; padding: 12px 16px;
 <header>
   <span class="name">K<b>0</b>B<b>0</b>L</span>
   <span class="meta" id="meta">connecting…</span>
+  <button id="options" class="hbtn" title="options">⚙</button>
 </header>
 <main id="transcript" aria-live="polite"></main>
 <form id="form">
@@ -146,7 +291,44 @@ form { display: flex; gap: 10px; padding: 12px 16px;
          aria-label="message">
   <button id="send">send</button>
 </form>
+<div id="overlay" hidden></div>
+<dialog id="options-dialog">
+  <h3>options</h3>
+  <label class="opt-label">theme
+    <select id="opt-theme"></select>
+  </label>
+  <label class="opt-label">chat model
+    <select id="opt-model"></select>
+  </label>
+  <div class="opt-row">
+    <label class="opt-label">show thinking</label>
+    <label class="switch"><input type="checkbox" id="opt-think"><span></span></label>
+  </div>
+  <div class="opt-row">
+    <label class="opt-label">tool output</label>
+    <select id="opt-tools">
+      <option value="off">off</option>
+      <option value="summary">summary</option>
+      <option value="full">full</option>
+    </select>
+  </div>
+  <div class="opt-actions">
+    <button id="opt-clear">clear conversation</button>
+    <button id="opt-close">close</button>
+  </div>
+</dialog>
 <script>
+const THEMES = {
+  "k0b0l-dark": null,
+  "hotdog-3x": {"--bg":"#A80000","--surface":"#8E0000","--band":"#5C0000","--ink":"#FFFF00","--muted":"#FFCC00","--faint":"#CC9900","--accent":"#FFB000","--accent-ink":"#000000","--code-bg":"#000000","--think-bg":"#5C0000","--warn":"#FF8C00","--err":"#FF2D2D","--border":"#FFFF00"},
+  "beos": {"--bg":"#D6D3CE","--surface":"#C9C5BE","--band":"#C9C5BE","--ink":"#101010","--muted":"#4A4640","--faint":"#8A867E","--accent":"#1A1AB8","--accent-ink":"#FFFFFF","--code-bg":"#FFFFFF","--think-bg":"#C9C5BE","--warn":"#A08000","--err":"#C00000","--border":"#8A867E"},
+  "commodore-64": {"--bg":"#352879","--surface":"#2A1F60","--band":"#241A52","--ink":"#A6A0F0","--muted":"#9B93E8","--faint":"#6C5EB5","--accent":"#B8C76F","--accent-ink":"#352879","--code-bg":"#1B1240","--think-bg":"#241A52","--warn":"#B8C76F","--err":"#9A6759","--border":"#6C5EB5"},
+  "edit-com": {"--bg":"#0000AA","--surface":"#000088","--band":"#000066","--ink":"#AAAAAA","--muted":"#767676","--faint":"#545454","--accent":"#FFFF55","--accent-ink":"#0000AA","--code-bg":"#000044","--think-bg":"#000066","--warn":"#FFFF55","--err":"#FF5555","--border":"#00AAAA"},
+  "amber": {"--bg":"#000000","--surface":"#140D00","--band":"#2B1D00","--ink":"#FFB000","--muted":"#FFC46B","--faint":"#8A5F00","--accent":"#FFD9A0","--accent-ink":"#000000","--code-bg":"#140D00","--think-bg":"#2B1D00","--warn":"#E8A200","--err":"#FF7A00","--border":"#8A5F00"},
+  "matrix": {"--bg":"#000000","--surface":"#001A0A","--band":"#003B00","--ink":"#00FF41","--muted":"#7CFF9B","--faint":"#008F11","--accent":"#7CFF9B","--accent-ink":"#000000","--code-bg":"#001A0A","--think-bg":"#003B00","--warn":"#B6FF00","--err":"#FF3B3B","--border":"#008F11"},
+};
+const DEFAULT_PALETTE = {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330"};
+const ROOT_VARS = ["--bg","--surface","--band","--ink","--muted","--faint","--accent","--accent-ink","--code-bg","--think-bg","--warn","--err","--border"];
 const ws = new WebSocket(
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
 const transcript = document.getElementById("transcript");
@@ -157,6 +339,20 @@ let turn = null;
 let proseEl = null;
 let thinkEl = null;
 let codeBuf = null;
+let genBar = null;
+let genLabel = null;
+let currentTheme = "k0b0l-dark";
+
+function applyTheme(name) {
+  if (name !== "k0b0l-dark" && !THEMES[name]) name = "k0b0l-dark";
+  const palette = THEMES[name] || DEFAULT_PALETTE;
+  for (const key of ROOT_VARS) {
+    document.documentElement.style.setProperty(key, palette[key]);
+  }
+  currentTheme = name;
+  const sel = document.getElementById("opt-theme");
+  if (sel && sel.value !== name) sel.value = name;
+}
 
 function newTurn() {
   turn = document.createElement("div");
@@ -185,6 +381,7 @@ ws.onmessage = (ev) => {
   switch (m.kind) {
     case "meta":
       meta.textContent = m.model + " · " + m.protocol + " · ctx " + m.num_ctx;
+      applyTheme(m.theme || "k0b0l-dark");
       break;
     case "you":
       newTurn(); who("you", "you");
@@ -246,7 +443,37 @@ ws.onmessage = (ev) => {
       cap.textContent = m.path + (m.label ? " · " + m.label : "");
       fig.appendChild(cap);
       turn.appendChild(fig);
-      proseEl = null; thinkEl = null; scroll();
+      proseEl = null; thinkEl = null;
+      genBar = null;
+      scroll();
+      break;
+    case "gen_progress":
+      if (!genBar) {
+        const wrap = document.createElement("div");
+        wrap.className = "genbar-wrap";
+        genLabel = document.createElement("div");
+        genLabel.className = "genbar-label";
+        genBar = document.createElement("div");
+        genBar.className = "genbar";
+        const fill = document.createElement("div");
+        fill.className = "fill";
+        genBar.appendChild(fill);
+        wrap.appendChild(genLabel);
+        wrap.appendChild(genBar);
+        turn.appendChild(wrap);
+        scroll();
+      }
+      if (m.total > 0 && m.step > 0) {
+        genBar.classList.remove("indeterminate");
+        const pct = Math.min(100, Math.round(100 * m.step / m.total));
+        genBar.querySelector(".fill").style.width = pct + "%";
+        genLabel.textContent = m.phase + " · " + m.step + "/" + m.total
+          + " (" + pct + "%)";
+      } else {
+        genBar.classList.add("indeterminate");
+        genLabel.textContent = m.phase;
+      }
+      scroll();
       break;
     case "turn_end":
       turn = null; proseEl = null; thinkEl = null;
@@ -268,6 +495,49 @@ document.getElementById("form").addEventListener("submit", (e) => {
   input.value = "";
   ws.send(JSON.stringify({ text }));
 });
+
+// -- the options dialog ---------------------------------------------------
+const dialog = document.getElementById("options-dialog");
+const themeSel = document.getElementById("opt-theme");
+const modelSel = document.getElementById("opt-model");
+const thinkBox = document.getElementById("opt-think");
+const toolsSel = document.getElementById("opt-tools");
+
+for (const name of Object.keys(THEMES)) {
+  const opt = document.createElement("option");
+  opt.value = name; opt.textContent = name === "k0b0l-dark" ? "k0b0l dark (default)" : name;
+  themeSel.appendChild(opt);
+}
+themeSel.value = currentTheme;
+themeSel.addEventListener("change", () => {
+  applyTheme(themeSel.value);
+  ws.send(JSON.stringify({ theme: themeSel.value }));
+});
+
+fetch("/models").then((r) => r.json()).then((d) => {
+  for (const name of d.models || []) {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    modelSel.appendChild(opt);
+  }
+  modelSel.value = meta.textContent.split(" · ")[0] || "";
+}).catch(() => {});
+modelSel.addEventListener("change", () => {
+  if (modelSel.value) ws.send(JSON.stringify({ text: "/model " + modelSel.value }));
+});
+
+thinkBox.addEventListener("change", () => {
+  ws.send(JSON.stringify({ text: "/think " + (thinkBox.checked ? "on" : "off") }));
+});
+toolsSel.addEventListener("change", () => {
+  ws.send(JSON.stringify({ text: "/tools " + toolsSel.value }));
+});
+document.getElementById("opt-clear").addEventListener("click", () => {
+  ws.send(JSON.stringify({ text: "/clear" }));
+  dialog.close();
+});
+document.getElementById("opt-close").addEventListener("click", () => dialog.close());
+document.getElementById("options").addEventListener("click", () => dialog.showModal());
 </script>
 </body>
 </html>"""
@@ -373,6 +643,11 @@ class WebChat(ChatUI):
     def show_image(self, relative_path: str) -> None:
         self._frame({"kind": "image", "path": relative_path})
 
+    def gen_progress(self, phase: str, step: int, total: int) -> None:
+        """A generation-progress frame: the page renders a live bar."""
+        self._frame({"kind": "gen_progress", "phase": phase,
+                     "step": step, "total": total})
+
     # -- turn lifecycle: the page keys its turn bookkeeping on these -------
     def turn_start(self, model: str, protocol: str) -> None:
         self._fence_open = False
@@ -413,6 +688,7 @@ def main() -> int:
     from starlette.websockets import WebSocket, WebSocketDisconnect
 
     from rt_harness.tui import _pick_client
+    from rt_harness.themes import load_saved_theme, save_theme
 
     config = Config.from_env(None)
     client = _pick_client(config)
@@ -423,11 +699,13 @@ def main() -> int:
         return 1
 
     chat_config = config.chat
+    saved_theme = load_saved_theme(list(WEB_THEMES))
 
     async def page(request):
         return HTMLResponse(PAGE)
 
     async def ws_endpoint(websocket: WebSocket) -> None:
+        nonlocal saved_theme
         await websocket.accept()
         # WebChat IS a ChatUI: the session it builds binds itself as the
         # hooks, every render sinks to the socket, and dispatch's whole
@@ -439,11 +717,26 @@ def main() -> int:
             "kind": "meta", "model": chat_config.model,
             "protocol": ui.session.protocol,
             "num_ctx": chat_config.num_ctx,
+            "theme": saved_theme or "k0b0l-dark",
         })
         loop = asyncio.get_event_loop()
         try:
             while True:
                 message = await websocket.receive_json()
+                wanted_theme = message.get("theme")
+                if isinstance(wanted_theme, str) and wanted_theme in WEB_THEMES:
+                    # The page owns the palette swap client-side; this
+                    # makes the choice durable and shared with the TUI
+                    # through the one prefs file, and echoes it back to
+                    # the requesting tab; later tabs read the new value.
+                    save_theme(wanted_theme)
+                    saved_theme = wanted_theme
+                    await websocket.send_json({
+                        "kind": "meta", "model": chat_config.model,
+                        "protocol": ui.session.protocol,
+                        "num_ctx": chat_config.num_ctx,
+                        "theme": wanted_theme})
+                    continue
                 text = str(message.get("text", "")).strip()
                 if not text:
                     continue

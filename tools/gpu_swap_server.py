@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -45,9 +46,76 @@ IMAGE_MODELS = ("pony", "qwen", "chroma")
 #: client can tell the resident model from the one it asked for.
 current_image_model: str | None = None
 
+#: The children this supervisor Popen'd. A Popen'd server that exits is a
+#: zombie until someone waits on it -- an sd-server sat defunct with the
+#: port already free, reading as a live service in every ps output.
+_sd_process: subprocess.Popen | None = None
+_llama_process: subprocess.Popen | None = None
+
+
+def _reap(handle: subprocess.Popen | None, timeout: float = 5.0) -> None:
+    """Collect a child this supervisor spawned, if it is done dying.
+
+    The callers only invoke this after pkill/health loops report the
+    service down, so the wait returns immediately; a process that
+    somehow survives its kill is left alone, still owned by its handle.
+    """
+    if handle is None:
+        return
+    try:
+        handle.wait(timeout=timeout)
+    except Exception:  # noqa: BLE001 - still running: nothing to collect
+        pass
+
 #: Swaps are serialized: two concurrent requests must not interleave the
 #: stop/start cycles of two different models.
 _STATE_LOCK = threading.Lock()
+
+#: A sampling-progress line from sd.cpp ("12/20 - 4.89s/it"). The weight
+#: load lines say MB/s, so requiring s/it tells the two apart.
+_PROGRESS_RE = re.compile(r"(\d+)/(\d+)\s*-\s*[\d.]+s/it")
+
+#: Forward-only scan state for the sd-server log: bytes already read, and
+#: the freshest step seen among them. ``pos`` of None means not yet
+#: baselined -- the first read skips to the file's end, because history
+#: from before the supervisor started watching is not progress.
+_SD_SCAN: dict = {"pos": None, "last": None}
+
+
+def read_sd_progress() -> dict | None:
+    """The newest sampling step the sd-server has written, or None.
+
+    Forward-only: each poll scans just the bytes written since the last
+    one, so a step is reported when it happens rather than replayed from
+    history. The first read after startup baselines at the file's end --
+    a fresh generation opened with a stale "1/49" and never corrected,
+    when the whole tail was re-scanned every poll. A shrunk file
+    (rotation) resets the baseline. sd.cpp block-buffers its per-step
+    carriage-return updates, so steps can arrive in bursts; the last
+    step of a burst is the freshest truth there is.
+    """
+    try:
+        size = os.path.getsize(SD_LOG)
+    except OSError:
+        return None
+    if _SD_SCAN["pos"] is None:  # first read: skip the history
+        _SD_SCAN["pos"] = size
+        return None
+    if size < _SD_SCAN["pos"]:  # rotated or truncated: re-baseline
+        _SD_SCAN["pos"] = size
+        _SD_SCAN["last"] = None
+    with open(SD_LOG, "rb") as handle:
+        handle.seek(_SD_SCAN["pos"])
+        chunk = handle.read().decode("utf-8", "replace")
+        _SD_SCAN["pos"] += len(chunk.encode("utf-8", "replace"))
+    last = None
+    for match in _PROGRESS_RE.finditer(chunk):
+        last = match
+    if last is not None:
+        step, total = int(last.group(1)), int(last.group(2))
+        if 0 < step <= total < 100_000:
+            _SD_SCAN["last"] = {"step": step, "total": total}
+    return _SD_SCAN["last"]
 
 
 def healthy(url: str, path: str = "/health") -> bool:
@@ -86,28 +154,33 @@ def stop_llama() -> None:
 
 
 def stop_sd() -> None:
-    global current_image_model
+    global current_image_model, _sd_process
     subprocess.run(["pkill", "-f", "sd-server"], check=False)
     for _ in range(20):
         if not image_healthy():
             current_image_model = None
+            _reap(_sd_process)
+            _sd_process = None
             return
         time.sleep(0.5)
     subprocess.run(["pkill", "-9", "-f", "sd-server"], check=False)
     time.sleep(1)
     current_image_model = None
+    _reap(_sd_process)
+    _sd_process = None
 
 
 def start_llama() -> None:
     # Prefer the systemd unit (k0b0l-llama) so the service manager owns
     # the process again; the direct spawn is the non-systemd fallback.
+    global _llama_process
     stopped = subprocess.run(
         ["sudo", "-n", "systemctl", "start", "k0b0l-llama.service"],
         check=False)
     if stopped.returncode == 0:
         return
     log = open(LLAMA_LOG, "ab")
-    subprocess.Popen(
+    _llama_process = subprocess.Popen(
         ["./llama-server", "--models-dir", "./models",
          "--models-preset", "./models.ini", "--models-max", "1",
          "--host", "0.0.0.0", "--port", "11434"],
@@ -116,10 +189,10 @@ def start_llama() -> None:
 
 
 def start_sd(model: str) -> None:
-    global current_image_model
+    global current_image_model, _sd_process
     current_image_model = model
     log = open(SD_LOG, "ab")
-    subprocess.Popen(
+    _sd_process = subprocess.Popen(
         [str(IMAGE_SERVER), model],
         stdout=log, stderr=log, start_new_session=True)
 
@@ -141,6 +214,10 @@ class Handler(BaseHTTPRequestHandler):
                 "image_model": current_image_model,
                 "image_models": list(IMAGE_MODELS),
             })
+        elif self.path == "/progress":
+            # Live sampling steps from the sd-server's log; None when it
+            # is not mid-sampling (loading, encoding, or no image service).
+            self._json(200, {"progress": read_sd_progress()})
         else:
             self._json(404, {"error": "GET /state"})
 

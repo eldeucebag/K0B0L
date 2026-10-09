@@ -778,13 +778,78 @@ class Workspace:
             argv += ["--neg", negative_prompt]
         argv += ["--out", str(out_dir / f"{model}-{int(time.time())}.png")]
         expected_out = argv[argv.index("--out") + 1]
+
+        # Progress markers the runner prints on stderr, decoded into
+        # hook events: "PHASE <text>" (total 0) and "PROGRESS <n>/<m>".
+        progress_re = re.compile(r"^(?:PHASE|PROGRESS)\s+(.+)$")
+
+        def report(stderr_line: str) -> None:
+            match = progress_re.match(stderr_line.strip())
+            if not match:
+                return
+            body = match.group(1)
+            step_match = re.match(r"^(\d+)\s*/\s*(\d+)$", body)
+            if step_match:
+                emit = getattr(self._ui, "gen_progress", None)
+                if callable(emit):
+                    emit("sampling", int(step_match.group(1)),
+                         int(step_match.group(2)))
+                return
+            emit = getattr(self._ui, "gen_progress", None)
+            if callable(emit):
+                emit(body, 0, 0)
+
         try:
             # Thirty minutes. Measured: a qwen 1024x1024 run took 910 s on
             # this GPU -- the old ten-minute kill fired mid-generation and
             # took the runner's swap-back with it, stranding the card on
             # the image service with the llm endpoint dead.
-            completed = subprocess.run(  # noqa: S603 - argv list, no shell
-                argv, capture_output=True, text=True, timeout=1800)
+            process = subprocess.Popen(  # noqa: S603 - argv list, no shell
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True)
+            stderr_tail: list[str] = []
+            deadline = time.monotonic() + 1800
+            # A select loop, not a blocking readline: a silent runner
+            # (weights loading from NTFS says nothing for minutes) must
+            # still hit the deadline, and the marker lines must reach the
+            # hooks as they arrive rather than at exit.
+            import selectors
+
+            sel = selectors.DefaultSelector()
+            sel.register(process.stderr, selectors.EVENT_READ)
+            try:
+                while True:
+                    events = sel.select(timeout=1.0)
+                    if events:
+                        line = process.stderr.readline()
+                        if line:
+                            report(line)
+                            stderr_tail.append(line.rstrip("\n"))
+                            if len(stderr_tail) > 60:
+                                stderr_tail.pop(0)
+                            continue
+                    if process.poll() is not None:
+                        # Drain anything left in the pipe before closing.
+                        for line in process.stderr:
+                            report(line)
+                            stderr_tail.append(line.rstrip("\n"))
+                            if len(stderr_tail) > 60:
+                                stderr_tail.pop(0)
+                        break
+                    if time.monotonic() > deadline:
+                        process.kill()
+                        process.wait()
+                        raise subprocess.TimeoutExpired(argv, 1800)
+            finally:
+                sel.close()
+                for stream in (process.stdout, process.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            completed = subprocess.CompletedProcess(
+                argv, process.returncode,
+                stdout="", stderr="\n".join(stderr_tail))
         except subprocess.TimeoutExpired:
             # The runner owns the swap-back; killed here it never runs, so
             # ask the supervisor for the card back before reporting. A
