@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
@@ -140,6 +142,17 @@ header .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
 .who { font-size: 11px; letter-spacing: 0.14em; color: var(--faint);
        text-transform: uppercase; margin-bottom: -8px; }
 .who.you { color: var(--accent); }
+.who.busy { color: var(--muted); }
+.typing { display: inline-block; margin-left: 6px; }
+.typing .dot { opacity: 0.25; }
+.typing.busy .dot { animation: bounce 1.2s infinite; }
+.typing.busy .dot:nth-child(2) { animation-delay: 0.2s; }
+.typing.busy .dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+.busyclock { color: var(--faint); margin-left: 8px; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; }
 details { background: var(--band); border-radius: 8px; }
 details summary {
@@ -342,6 +355,46 @@ let codeBuf = null;
 let genBar = null;
 let genLabel = null;
 let currentTheme = "k0b0l-dark";
+let whoEl = null;
+let typingEl = null;
+let busyTimer = null;
+let busyStart = null;
+let busy = false;
+
+function setBusy(on) {
+  // Remember the request across reconnects and element churn: a busy
+  // frame can arrive before the assistant row exists (inference starts
+  // before the turn header is drawn), and the input must never stay
+  // wedged off because a turn element went away.
+  busy = on;
+  if (typingEl) {
+    typingEl.classList.toggle("busy", on);
+  }
+  if (whoEl) {
+    whoEl.classList.toggle("busy", on);
+  }
+  if (on && !busyStart) {
+    busyStart = Date.now();
+    clearInterval(busyTimer);
+    busyTimer = setInterval(() => {
+      if (busyStart) {
+        const secs = Math.round((Date.now() - busyStart) / 1000);
+        if (typingEl) {
+          const clock = typingEl.querySelector(".busyclock");
+          if (clock) clock.textContent = secs + "s";
+        }
+      }
+    }, 1000);
+  } else if (!on) {
+    clearInterval(busyTimer);
+    busyTimer = null;
+    busyStart = null;
+    if (typingEl) {
+      const clock = typingEl.querySelector(".busyclock");
+      if (clock) clock.textContent = "";
+    }
+  }
+}
 
 function applyTheme(name) {
   if (name !== "k0b0l-dark" && !THEMES[name]) name = "k0b0l-dark";
@@ -364,6 +417,7 @@ function who(name, cls) {
   el.className = "who " + (cls || "");
   el.textContent = name;
   turn.appendChild(el);
+  return el;  // the assistant handler anchors the dots to this element
 }
 function scroll() {
   transcript.scrollTop = transcript.scrollHeight;
@@ -388,7 +442,24 @@ ws.onmessage = (ev) => {
       proseEl = el("div", "prose"); proseEl.textContent = m.text; scroll();
       break;
     case "assistant":
-      newTurn(); who(m.thinking ? "model (thinking)" : "model");
+      // A new turn must not inherit the previous turn's prose anchor:
+      // the you-handler set proseEl, and the delta-handler appends to
+      // whatever proseEl holds -- without this reset the model's words
+      // stream into the *user's* reply block.
+      newTurn();
+      proseEl = null; thinkEl = null; genBar = null; genLabel = null;
+      whoEl = who(m.thinking ? "model (thinking)" : "model");
+      typingEl = document.createElement("span");
+      typingEl.className = "typing";
+      typingEl.innerHTML = '<span class="dot">·</span>' +
+                           '<span class="dot">·</span>' +
+                           '<span class="dot">·</span>' +
+                           '<span class="busyclock"></span>';
+      whoEl.appendChild(typingEl);
+      if (busy) setBusy(true);  // busy can precede the row it belongs to
+      break;
+    case "busy":
+      setBusy(m.on);
       break;
     case "delta":
       if (!proseEl) { proseEl = el("div", "prose"); }
@@ -476,7 +547,9 @@ ws.onmessage = (ev) => {
       scroll();
       break;
     case "turn_end":
+      setBusy(false);
       turn = null; proseEl = null; thinkEl = null;
+      whoEl = null; typingEl = null;
       send.disabled = false; input.focus();
       break;
     case "raw":
@@ -485,7 +558,13 @@ ws.onmessage = (ev) => {
   }
 };
 ws.onopen = () => { meta.textContent = "connected"; input.focus(); };
-ws.onclose = () => { meta.textContent = "disconnected — restart the server"; };
+ws.onclose = () => {
+  meta.textContent = "disconnected — the input still works; messages " +
+    "queue in the page until the server returns";
+  setBusy(false);
+  send.disabled = false;  // a dead socket must not wedge the input
+  input.focus();
+};
 
 document.getElementById("form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -664,10 +743,10 @@ class WebChat(ChatUI):
         self._frame({"kind": "turn_end"})
 
     def inference_start(self) -> None:
-        pass
+        self._frame({"kind": "busy", "on": True})
 
     def inference_end(self) -> None:
-        pass
+        self._frame({"kind": "busy", "on": False})
 
     def refresh_folds(self, kind: str, folded: bool) -> None:
         pass  # folds are client-side details elements in the web UI
@@ -700,6 +779,10 @@ def main() -> int:
 
     chat_config = config.chat
     saved_theme = load_saved_theme(list(WEB_THEMES))
+    #: The swap supervisor sits on the GPU box that serves the endpoint,
+    #: on the fixed sibling port (same derivation as tools/imagegen.py).
+    swap_api = (f"http://{urlparse(config.api_url).hostname or '127.0.0.1'}"
+                f":7861")
 
     async def page(request):
         return HTMLResponse(PAGE)
@@ -754,6 +837,59 @@ def main() -> int:
                     await websocket.send_json({"kind": "turn_end"})
                     continue
                 await websocket.send_json({"kind": "you", "text": text})
+                # The GPU is one card shared with image generation. After an
+                # image turn the model is merely unloaded (slow reload); after
+                # a swap the whole llm service is *down* and the turn would
+                # die on a bare connection-refused that says nothing about
+                # why. Restore the service first, saying so as it happens --
+                # the busy dots keep animating through the swap.
+                try:
+                    with urllib.request.urlopen(
+                            swap_api + "/state", timeout=2) as r:
+                        swap_state = json.loads(r.read())
+                except Exception:  # noqa: BLE001 - no supervisor, no swap
+                    swap_state = None
+                if swap_state and not swap_state.get("llm", True):
+                    await websocket.send_json({"kind": "busy", "on": True})
+                    await websocket.send_json({
+                        "kind": "notice",
+                        "text": "the llm service is down — the GPU was "
+                                "swapped to image generation; swapping "
+                                "back (this can take a minute)..."})
+                    try:
+                        request = urllib.request.Request(
+                            swap_api + "/swap/llm", data=b"{}",
+                            headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(
+                                request, timeout=140) as r:
+                            json.loads(r.read())
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": "the llm service is back"})
+                    except Exception as exc:  # noqa: BLE001
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": f"could not restore the llm service: "
+                                    f"{exc}"})
+                    await websocket.send_json({"kind": "busy", "on": False})
+                # A swapped-away model reloads its weights on this turn:
+                # 10-40 s for the 8B, ~130 s for the 14B, and until the
+                # first token there is no frame at all. Say so before the
+                # silence, or the turn reads as hung.
+                try:
+                    rows = client.model_details()
+                except Exception:  # noqa: BLE001 - a probe must not kill the turn
+                    rows = []
+                for row in rows:
+                    if (str(row.get("id")) == chat_config.model
+                            and str(row.get("state", "")).lower()
+                            == "unloaded"):
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": f"loading {chat_config.model} "
+                                    "(weights were swapped off the card; "
+                                    "this can take a minute)"})
+                        break
                 await loop.run_in_executor(None, ui.ask, text)
         except WebSocketDisconnect:
             pass
