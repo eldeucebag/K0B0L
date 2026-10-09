@@ -120,23 +120,35 @@ PAGE = """<!DOCTYPE html>
   --mono: ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body {
   background: var(--bg); color: var(--ink);
   font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
-  display: grid; grid-template-rows: auto 1fr auto; height: 100vh;
+  /* minmax(0, 1fr): a plain 1fr row grows to its content's min-height,
+     so a long transcript made the BODY taller than the viewport and the
+     whole page scrolled -- header and form scrolled out of the frame.
+     The 0 floor pins the middle row to the window; the transcript owns
+     the scrolling. */
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh; height: 100dvh;
 }
 header {
   display: flex; align-items: baseline; gap: 12px;
   padding: 10px 16px; border-bottom: 1px solid #1d2330;
   background: var(--surface);
+  min-width: 0;
 }
 header .name { font-weight: 700; letter-spacing: 0.12em; }
 header .name b { color: var(--accent); }
-header .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
+header .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
 #transcript {
-  overflow-y: auto; padding: 18px 16px 10px; scroll-behavior: smooth;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 18px 16px 10px; scroll-behavior: smooth;
+  overscroll-behavior: contain;
   display: flex; flex-direction: column; gap: 14px;
+  min-height: 0; min-width: 0;
 }
 .turn { display: flex; flex-direction: column; gap: 14px; }
 .who { font-size: 11px; letter-spacing: 0.14em; color: var(--faint);
@@ -188,6 +200,10 @@ pre.code {
 .tool .result.error { color: var(--err); }
 .notice { color: var(--warn); font-size: 13px; }
 .notice::before { content: "· "; }
+/* Long unbroken tokens must wrap inside the window, never push it wide */
+.notice, .errorline, .statusline, .tool .call, figcaption {
+  overflow-wrap: anywhere;
+}
 .errorline { color: var(--err); font-size: 13px; }
 .errorline::before { content: "! "; }
 .statusline { color: var(--faint); font-size: 12px;
@@ -211,6 +227,7 @@ form { display: flex; gap: 10px; padding: 12px 16px;
 }
 #send:disabled { opacity: 0.4; cursor: default; }
 .hbtn {
+  flex-shrink: 0;
   margin-left: auto; background: none; border: 1px solid var(--border);
   color: var(--muted); border-radius: 8px; width: 30px; height: 26px;
   cursor: pointer; font-size: 14px; line-height: 1;
@@ -245,8 +262,14 @@ dialog {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
   background: var(--surface); color: var(--ink);
   border: 1px solid var(--border); border-radius: 12px;
-  padding: 20px 24px; min-width: 320px; z-index: 50; margin: 0;
-  font: inherit;
+  padding: 20px 24px;
+  /* Scaled to the frame, never wider or taller than it: a fixed
+     min-width overflowed small windows; an unclamped height put the
+     dialog's top half out of reach. */
+  width: min(360px, calc(100vw - 24px));
+  max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  z-index: 50; margin: 0; font: inherit;
 }
 dialog::backdrop { background: rgba(0,0,0,0.5); }
 dialog h3 {
@@ -289,7 +312,7 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
 .switch input:checked + span::before {
   transform: translateX(17px); background: var(--accent-ink);
 }
-#history-dialog { min-width: 420px; max-width: 560px; }
+#history-dialog { width: min(540px, calc(100vw - 24px)); }
 .hist-actions { display: flex; gap: 8px; margin-bottom: 10px; }
 .hist-actions input {
   flex: 1; background: var(--bg); color: var(--ink);
