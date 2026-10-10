@@ -714,7 +714,9 @@ function artifactButtons(frame, opts) {
   if (opts.copyPrompt) {
     const p = document.createElement("button");
     p.className = "act";
-    p.textContent = "copy prompt";
+    // For images this carries the full request JSON (every knob);
+    // for text artifacts it is the plain prompt.
+    p.textContent = opts.copyPromptIsJson ? "copy request" : "copy prompt";
     p.addEventListener("click", () =>
       copyText(opts.copyPrompt));
     bar.appendChild(p);
@@ -858,17 +860,21 @@ ws.onmessage = (ev) => {
       });
       fig.appendChild(del);
       turn.appendChild(fig);
-      // The action bar under the artifact: retry the request that made
-      // it, copy its prompt, and (from the request echo) re-copy every
-      // knob. History images carry no request -- copy-prompt only there
-      // would guess; they get no retry.
+      // The action bar under the artifact. For an image, "copy" means
+      // the PROMPT that made it -- that is what the operator wants on
+      // their clipboard; the filename is already visible in the
+      // caption. "copy prompt" stays for explicitness, and retry
+      // re-sends the full request.
       const req = m.request || null;
+      const promptText = req ? String(req.prompt || "")
+        : (m.path || "");
       artifactButtons(m, {
-        copy: m.path,
+        copy: promptText,
         retry: !!req,
         request: req,
         initImage: !!(req && (req.init_image_b64 || req.mode !== "txt2img")),
-        copyPrompt: req ? String(req.prompt || "") : undefined,
+        copyPrompt: req ? JSON.stringify(req, null, 2) : undefined,
+        copyPromptIsJson: !!req,
       });
       proseEl = null; thinkEl = null;
       genBar = null;
