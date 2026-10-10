@@ -223,6 +223,16 @@ figcaption { color: var(--faint); font-size: 11.5px;
   font-size: 12px; padding: 0;
 }
 .img-del:hover { color: var(--err); border-color: var(--err); }
+.artifact-actions {
+  display: flex; gap: 6px; margin-top: 4px;
+}
+.artifact-actions .act {
+  background: var(--band); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 11.5px; padding: 3px 10px; cursor: pointer;
+  font-family: var(--mono);
+}
+.artifact-actions .act:hover { color: var(--accent); border-color: var(--accent); }
 form { display: flex; gap: 10px; padding: 12px 16px;
   border-top: 1px solid #1d2330; background: var(--surface); }
 #input {
@@ -643,6 +653,75 @@ function applyTheme(name) {
   if (sel && sel.value !== name) sel.value = name;
 }
 
+function copyText(text) {
+  // Clipboard where it works, execCommand as the fallback: a failure
+  // surfaces as a toast instead of a silent no-op.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => toast("copied"),
+      () => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+    toast("copied");
+  } catch (err) {
+    toast("copy failed — select the text manually");
+  }
+  ta.remove();
+}
+function toast(text) {
+  const t = el("div", "notice", text);
+  setTimeout(() => t.remove(), 2200);
+}
+function artifactButtons(frame, opts) {
+  // The action row every artifact carries: copy (the text/result),
+  // retry (re-send the request), and for images copy-prompt.
+  ensureTurn();
+  const bar = document.createElement("div");
+  bar.className = "artifact-actions";
+  if (opts.copy !== undefined) {
+    const b = document.createElement("button");
+    b.className = "act";
+    b.textContent = "copy";
+    b.addEventListener("click", () => copyText(opts.copy));
+    bar.appendChild(b);
+  }
+  if (opts.retry) {
+    const r = document.createElement("button");
+    r.className = "act";
+    r.textContent = "retry";
+    r.addEventListener("click", () => {
+      if (opts.initImage) {
+        // img2img/inpaint: the dialog still holds the init image and
+        // mask state -- prefill the fields and open it for a confirm
+        openImageDialog({ model: opts.request && opts.request.model,
+                          prompt: opts.request && opts.request.prompt });
+      } else {
+        ws.send(JSON.stringify({ image: opts.request }));
+      }
+    });
+    bar.appendChild(r);
+  }
+  if (opts.copyPrompt) {
+    const p = document.createElement("button");
+    p.className = "act";
+    p.textContent = "copy prompt";
+    p.addEventListener("click", () =>
+      copyText(opts.copyPrompt));
+    bar.appendChild(p);
+  }
+  turn.appendChild(bar);
+}
+
 function newTurn() {
   turn = document.createElement("div");
   turn.className = "turn";
@@ -779,6 +858,18 @@ ws.onmessage = (ev) => {
       });
       fig.appendChild(del);
       turn.appendChild(fig);
+      // The action bar under the artifact: retry the request that made
+      // it, copy its prompt, and (from the request echo) re-copy every
+      // knob. History images carry no request -- copy-prompt only there
+      // would guess; they get no retry.
+      const req = m.request || null;
+      artifactButtons(m, {
+        copy: m.path,
+        retry: !!req,
+        request: req,
+        initImage: !!(req && (req.init_image_b64 || req.mode !== "txt2img")),
+        copyPrompt: req ? String(req.prompt || "") : undefined,
+      });
       proseEl = null; thinkEl = null;
       genBar = null;
       scroll();
@@ -1442,8 +1533,10 @@ class WebChat(ChatUI):
                 head, _, rest = body.partition("\n")
                 self._frame({"kind": "tool_result", "ok": True,
                              "text": rest.strip()[:800]})
-        # Images the conversation generated: anything still on disk from
-        # this workspace is offered, newest first, after the messages.
+        # Images the conversation generated: each rendered as its own
+        # alternating turn (an assistant row, then the image) -- the same
+        # back-and-forth flow as text, instead of a pile dumped after
+        # the transcript. Newest first, capped.
         try:
             images = sorted(
                 (self.ui_session_root() / "images").glob("*.png"),
@@ -1451,8 +1544,10 @@ class WebChat(ChatUI):
         except OSError:
             images = []
         for path in images[:20]:
+            self._frame({"kind": "assistant"})
             self._frame({"kind": "image",
                          "path": f"images/{path.name}"})
+            self._frame({"kind": "turn_end"})
 
     def ui_session_root(self) -> Path:
         return self.session.workspace.root
@@ -1583,6 +1678,16 @@ def main() -> int:
     #: on the fixed sibling port (same derivation as tools/imagegen.py).
     swap_api = (f"http://{urlparse(config.api_url).hostname or '127.0.0.1'}"
                 f":7861")
+    #: Generation state shared across connections: "active" is the run in
+    #: flight (its frames are the replay log a refreshed page catches up
+    #: from), "last" the most recent finished run (replayed for a few
+    #: minutes so a refresh right after completion still shows the image).
+    #: A generation outlives the socket that requested it -- the operator
+    #: refreshing mid-run must rejoin the animation, not lose it.
+    GEN: dict[str, Any] = {"active": None, "last": None}
+    #: Every live WebSocket: image-generation frames broadcast to all of
+    #: them, so a second tab (or a refreshed one) sees the same run.
+    SOCKETS: set = set()
 
     async def page(request):
         return HTMLResponse(PAGE)
@@ -1622,7 +1727,21 @@ def main() -> int:
             ui.send_history(ui.session.messages)
             ui._frame({"kind": "restore_end"})
             await asyncio.sleep(0.2)
+        # Join an image run in flight (or one that finished moments ago):
+        # the page refreshed mid-generation must rejoin the animation,
+        # not sit blank -- and a refresh right after completion still
+        # sees the image with its buttons.
+        join = GEN["active"]
+        if join is None and GEN["last"] is not None \
+                and time.time() - GEN["last"]["ended"] < 300:
+            join = GEN["last"]
+        if join is not None:
+            await websocket.send_json({"kind": "restore_begin"})
+            for frame in join["frames"]:
+                await websocket.send_json(frame)
+            await websocket.send_json({"kind": "restore_end"})
         loop = asyncio.get_event_loop()
+        SOCKETS.add(websocket)
         try:
             while True:
                 message = await websocket.receive_json()
@@ -1687,23 +1806,52 @@ def main() -> int:
                             "text": "image generation needs a prompt"})
                         continue
                     if mode:
-                        # The user's own row echoes the request whole --
-                        # a truncated echo reads as a truncated prompt.
-                        await websocket.send_json({
-                            "kind": "you",
-                            "text": f"/image {mode} {model} {prompt}"})
+                        if GEN["active"] is not None:
+                            await websocket.send_json({
+                                "kind": "notice",
+                                "text": "a generation is already "
+                                        "running; it will stream here"})
+                            continue
+
+                        async def bcast(frame: dict[str, Any]) -> None:
+                            """Record into the run's replay log and send to
+                            every open tab: a generation outlives the socket
+                            that asked for it, so a refresh mid-run rejoins
+                            the animation and a second tab sees it live."""
+                            if GEN["active"] is not None:
+                                GEN["active"]["frames"].append(frame)
+                            for sock in list(SOCKETS):
+                                try:
+                                    await sock.send_json(frame)
+                                except Exception:  # noqa: BLE001
+                                    SOCKETS.discard(sock)
+
+                        # The request echo for copy/retry: every knob minus
+                        # the bulky b64 payloads (a retry re-uploads from
+                        # the dialog state, which the page still holds).
+                        req_echo = {k: v for k, v in img.items()
+                                    if k not in ("init_image_b64", "mask_b64")}
+                        GEN["active"] = {
+                            "frames": [], "request": req_echo,
+                            "ended": 0.0}
+
+                        # The user's own row echoes the request whole -- a
+                        # truncated echo reads as a truncated prompt.
+                        await bcast({"kind": "you",
+                                     "text": f"/image {mode} {model} "
+                                             f"{prompt}"})
                         # An image turn is still a turn: the assistant row
                         # anchors the busy dots, and an immediate
                         # indeterminate bar says "generating" through the
                         # minutes of swap + weight load before any
                         # sampling step exists to report.
-                        await websocket.send_json({"kind": "assistant"})
-                        await websocket.send_json({"kind": "busy", "on": True})
-                        await websocket.send_json({
-                            "kind": "gen_progress",
-                            "phase": "generating image — preparing "
-                                     "(swap / weight load)",
-                            "step": 0, "total": 0})
+                        await bcast({"kind": "assistant"})
+                        await bcast({"kind": "busy", "on": True})
+                        await bcast({"kind": "gen_progress",
+                                     "phase": "generating image — "
+                                              "preparing (swap / weight "
+                                              "load)",
+                                     "step": 0, "total": 0})
                         out_dir = Path(
                             str(ui.session.workspace.root)) / "images"
                         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1798,11 +1946,12 @@ def main() -> int:
                                         if progress != last:
                                             last = progress
                                             last_change = time.time()
-                                            await websocket.send_json({
+                                            await bcast({
                                                 "kind": "gen_progress",
                                                 "phase": "sampling",
                                                 "step": progress["step"],
-                                                "total": progress["total"]})
+                                                "total":
+                                                    progress["total"]})
                                         if time.time() - last_change > 45:
                                             # steps stalled: VAE decode
                                             phase = ("finalizing "
@@ -1818,7 +1967,7 @@ def main() -> int:
                                                  "weight load)")
                                     if phase and phase != last_phase:
                                         last_phase = phase
-                                        await websocket.send_json({
+                                        await bcast({
                                             "kind": "gen_progress",
                                             "phase": phase,
                                             "step": 0, "total": 0})
@@ -1833,24 +1982,25 @@ def main() -> int:
                                 saved = sorted(
                                     out_dir.glob(f"{model}-{stamp}*.png"))
                                 for path in saved:
-                                    await websocket.send_json({
+                                    await bcast({
                                         "kind": "image",
-                                        "path": f"images/{path.name}"})
-                                await websocket.send_json({
+                                        "path": f"images/{path.name}",
+                                        "request": req_echo})
+                                await bcast({
                                     "kind": "raw",
                                     "text": (f"image saved to images/"
                                              f"{out_name}.png"
                                              + (f" (+{len(saved) - 1} more)"
                                                 if len(saved) > 1 else ""))})
                             else:
-                                await websocket.send_json({
+                                await bcast({
                                     "kind": "error",
                                     "text": "image generation failed; see "
                                             "the server log"})
                         except Exception as exc:  # noqa: BLE001
                             # A dead turn must not kill the socket: every
                             # path below still closes the turn.
-                            await websocket.send_json({
+                            await bcast({
                                 "kind": "error",
                                 "text": f"image generation failed: {exc}"})
                         finally:
@@ -1860,8 +2010,17 @@ def main() -> int:
                                         temp.unlink()
                                     except OSError:
                                         pass
-                        await websocket.send_json({"kind": "turn_end"})
-                        await websocket.send_json({"kind": "busy", "on": False})
+                        # Terminal frames FIRST, then retire: bcast logs
+                        # only while a run is active, so closing the turn
+                        # after GEN["active"] = None would leave the replay
+                        # without its turn_end -- a fresh page replaying
+                        # the run would never re-arm its input.
+                        await bcast({"kind": "turn_end"})
+                        await bcast({"kind": "busy", "on": False})
+                        run = GEN["active"]
+                        GEN["active"] = None
+                        run["ended"] = time.time()
+                        GEN["last"] = run
                         continue
                     # plain path: the tool, unchanged
                     args: dict[str, Any] = {"prompt": prompt, "model": model}
@@ -2054,6 +2213,7 @@ def main() -> int:
         except WebSocketDisconnect:
             pass
         finally:
+            SOCKETS.discard(websocket)
             try:
                 ui.session.memory and ui.session.memory.close()
             except Exception:  # noqa: BLE001
