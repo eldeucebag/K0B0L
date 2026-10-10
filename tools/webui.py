@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -314,6 +315,42 @@ dialog button:hover { border-color: var(--accent); color: var(--accent); }
 }
 #history-dialog { width: min(540px, calc(100vw - 24px)); }
 #image-dialog { width: min(440px, calc(100vw - 24px)); }
+#image-dialog .img-scroll {
+  max-height: calc(100vh - 220px); max-height: calc(100dvh - 220px);
+  overflow-y: auto; padding-right: 4px;
+}
+.img-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.img-tab {
+  flex: 1; background: var(--band); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 0; cursor: pointer; font: inherit; font-size: 13px;
+}
+.img-tab.active {
+  background: var(--accent); color: var(--accent-ink);
+  border-color: var(--accent); font-weight: 600;
+}
+.img-init-row { display: grid; gap: 10px; }
+.img-drop {
+  border: 1px dashed var(--border); border-radius: 8px;
+  padding: 10px; text-align: center; color: var(--faint);
+  cursor: pointer; font-size: 13px; min-height: 60px;
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 6px; overflow: hidden;
+}
+.img-drop:hover { border-color: var(--accent); color: var(--muted); }
+.img-drop img {
+  max-width: 100%; max-height: 160px; border-radius: 6px; display: block;
+}
+.img-mask-wrap { display: flex; gap: 10px; align-items: flex-start; }
+#img-mask-canvas {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 8px; cursor: crosshair; touch-action: none;
+  max-width: 100%;
+}
+.img-mask-tools { display: flex; flex-direction: column; gap: 8px; }
+.img-mask-btns { display: flex; flex-direction: column; gap: 6px; }
+.img-mask-btns button { font-size: 12px; padding: 5px 10px; }
+dialog button.secondary:hover { color: var(--muted); }
 #image-dialog textarea {
   width: 100%; background: var(--bg); color: var(--ink);
   border: 1px solid var(--border); border-radius: 8px;
@@ -380,6 +417,12 @@ dialog button.primary:hover { color: var(--accent-ink); }
 <div id="overlay" hidden></div>
 <dialog id="image-dialog">
   <h3>generate an image</h3>
+  <div class="img-tabs">
+    <button id="img-tab-txt2img" class="img-tab active">txt2img</button>
+    <button id="img-tab-img2img" class="img-tab">img2img</button>
+    <button id="img-tab-inpaint" class="img-tab">inpaint</button>
+  </div>
+  <div class="img-scroll">
   <label class="opt-label">model
     <select id="img-model">
       <option value="pony">pony — fast, tag-style prompting (SDXL)</option>
@@ -387,6 +430,33 @@ dialog button.primary:hover { color: var(--accent-ink); }
       <option value="chroma">chroma — Flux-class quality</option>
     </select>
   </label>
+  <div id="img-init-row" class="img-init-row" hidden>
+    <label class="opt-label">init image
+      <div class="img-drop" id="img-init-drop">
+        <span id="img-init-name">drop / click to load</span>
+        <img id="img-init-preview" alt="" hidden>
+      </div>
+      <input type="file" id="img-init-file" accept="image/png,image/jpeg,image/webp" hidden>
+    </label>
+    <div id="img-mask-block" hidden>
+      <div class="opt-label">mask — paint what to change</div>
+      <div class="img-mask-wrap">
+        <canvas id="img-mask-canvas" width="384" height="384"></canvas>
+        <div class="img-mask-tools">
+          <label class="opt-label">brush
+            <input type="range" id="img-brush-size" min="4" max="96" value="28">
+          </label>
+          <div class="img-mask-btns">
+            <button id="img-mask-clear">clear</button>
+            <button id="img-mask-invert" class="secondary">invert</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <label class="opt-label" id="img-denoise-label">denoising strength
+      <input id="img-denoise" type="number" min="0" max="1" step="0.05" value="0.75">
+    </label>
+  </div>
   <label class="opt-label">prompt
     <textarea id="img-prompt" rows="3"
       placeholder="what to draw"></textarea>
@@ -411,6 +481,40 @@ dialog button.primary:hover { color: var(--accent-ink); }
       <input id="img-seed" type="number" min="0"
         placeholder="random">
     </label>
+  </div>
+  <div class="img-grid">
+    <label class="opt-label">sampler
+      <select id="img-sampler">
+        <option value="">model default</option>
+      </select>
+    </label>
+    <label class="opt-label">scheduler
+      <select id="img-scheduler">
+        <option value="">model default</option>
+      </select>
+    </label>
+    <label class="opt-label">noise / rng
+      <select id="img-rng">
+        <option value="">server default</option>
+        <option value="cuda">cuda (sd-webui)</option>
+        <option value="cpu">cpu (comfyui)</option>
+        <option value="std_default">std_default</option>
+      </select>
+    </label>
+  </div>
+  <div class="img-grid">
+    <label class="opt-label">cfg scale
+      <input id="img-cfg" type="number" min="0" max="30" step="0.5"
+        placeholder="model default">
+    </label>
+    <label class="opt-label">batch
+      <input id="img-batch" type="number" min="1" max="8" value="1">
+    </label>
+    <label class="opt-label">eta
+      <input id="img-eta" type="number" min="0" max="1" step="0.05"
+        placeholder="sampler default">
+    </label>
+  </div>
   </div>
   <div class="opt-actions">
     <button id="img-cancel">cancel</button>
@@ -856,6 +960,144 @@ function renderSessionList(entries) {
 
 // -- the image dialog --------------------------------------------------------
 const imageDialog = document.getElementById("image-dialog");
+const IMG_MODES = ["txt2img", "img2img", "inpaint"];
+let imgMode = "txt2img";
+let imgInitB64 = "";      // data URL of the loaded init image
+let imgInitNatural = null; // {width, height}
+
+function setImageMode(mode) {
+  imgMode = mode;
+  for (const m of IMG_MODES) {
+    document.getElementById("img-tab-" + m).classList
+      .toggle("active", m === mode);
+  }
+  document.getElementById("img-init-row").hidden = mode === "txt2img";
+  document.getElementById("img-mask-block").hidden = mode !== "inpaint";
+  document.getElementById("img-denoise-label").hidden = mode === "txt2img";
+}
+for (const m of IMG_MODES) {
+  document.getElementById("img-tab-" + m).addEventListener("click",
+    () => setImageMode(m));
+}
+
+// -- init image loading (click / drag-drop / paste) ---------------------------
+const initDrop = document.getElementById("img-init-drop");
+const initFile = document.getElementById("img-init-file");
+function loadInitFile(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    imgInitB64 = String(reader.result);
+    const img = new Image();
+    img.onload = () => {
+      imgInitNatural = { width: img.width, height: img.height };
+      const preview = document.getElementById("img-init-preview");
+      preview.src = imgInitB64; preview.hidden = false;
+      document.getElementById("img-init-name").textContent =
+        file.name + " (" + img.width + "×" + img.height + ")";
+      // size the mask canvas to the image
+      const canvas = document.getElementById("img-mask-canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      clearMask();
+    };
+    img.src = imgInitB64;
+  };
+  reader.readAsDataURL(file);
+}
+initDrop.addEventListener("click", () => initFile.click());
+initFile.addEventListener("change", () => loadInitFile(initFile.files[0]));
+initDrop.addEventListener("dragover", (e) => e.preventDefault());
+initDrop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  loadInitFile(e.dataTransfer.files[0]);
+});
+
+// -- the mask canvas: paint white = generate, black = keep -------------------
+const maskCanvas = document.getElementById("img-mask-canvas");
+const maskCtx = maskCanvas.getContext("2d");
+let maskPainting = false;
+let maskHasPaint = false;
+
+function clearMask() {
+  maskCtx.fillStyle = "#000";
+  maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+  maskHasPaint = false;
+}
+function maskPos(e) {
+  const rect = maskCanvas.getBoundingClientRect();
+  const scaleX = maskCanvas.width / rect.width;
+  const scaleY = maskCanvas.height / rect.height;
+  const pt = e.touches ? e.touches[0] : e;
+  return { x: (pt.clientX - rect.left) * scaleX,
+           y: (pt.clientY - rect.top) * scaleY };
+}
+function maskPaint(e) {
+  if (!maskPainting) return;
+  e.preventDefault();
+  const p = maskPos(e);
+  const size = parseInt(
+    document.getElementById("img-brush-size").value, 10);
+  maskCtx.fillStyle = "#fff";
+  maskCtx.beginPath();
+  maskCtx.arc(p.x, p.y, size / 2, 0, Math.PI * 2);
+  maskCtx.fill();
+  maskHasPaint = true;
+}
+maskCanvas.addEventListener("pointerdown", (e) => {
+  maskPainting = true; maskPaint(e);
+});
+maskCanvas.addEventListener("pointermove", maskPaint);
+addEventListener("pointerup", () => { maskPainting = false; });
+document.getElementById("img-mask-clear").addEventListener("click", clearMask);
+document.getElementById("img-mask-invert").addEventListener("click", () => {
+  const w = maskCanvas.width, h = maskCanvas.height;
+  const data = maskCtx.getImageData(0, 0, w, h);
+  for (let i = 0; i < data.data.length; i += 4) {
+    data.data[i] = 255 - data.data[i];
+  }
+  maskCtx.putImageData(data, 0, 0);
+});
+clearMask();
+
+// -- populate samplers/schedulers --------------------------------------------
+// Static first, from the sd.cpp binary's own --help (commit a1ded76):
+// the options must be pickable BEFORE the card swaps to images, and
+// the live /sdapi route only answers while sd-server runs -- which in
+// llm mode it does not. A live fetch then appends anything a newer
+// build adds; it 502s quietly while the llm holds the card.
+const IMG_SAMPLERS = ["euler", "euler_a", "heun", "dpm2", "dpm++2s_a",
+  "dpm++2m", "dpm++2mv2", "ipndm", "ipndm_v", "lcm", "ddim_trailing",
+  "tcd", "res_multistep", "res_2s", "er_sde", "euler_cfg_pp",
+  "euler_a_cfg_pp", "euler_ge", "dpm++2m_sde", "dpm++2m_sde_bt", "lms"];
+const IMG_SCHEDULERS = ["discrete", "karras", "exponential", "ays", "gits",
+  "sgm_uniform", "simple", "smoothstep", "kl_optimal", "lcm",
+  "bong_tangent", "ltx2", "logit_normal", "flux2", "flux", "beta",
+  "llada_image"];
+
+function fillSelect(id, names) {
+  const sel = document.getElementById(id);
+  const have = new Set(Array.from(sel.options).map((o) => o.value));
+  for (const n of names) {
+    if (have.has(n)) continue;
+    const opt = document.createElement("option");
+    opt.value = n; opt.textContent = n;
+    sel.appendChild(opt);
+  }
+}
+
+function loadSamplers() {
+  fillSelect("img-sampler", IMG_SAMPLERS);
+  fillSelect("img-scheduler", IMG_SCHEDULERS);
+  fetch("/image-api/sdapi/v1/samplers")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((list) => {
+      if (Array.isArray(list)) {
+        fillSelect("img-sampler", list.map((s) => s.name));
+      }
+    })
+    .catch(() => {});
+}
+loadSamplers();
 
 function openImageDialog(prefill) {
   // prefill: {model, prompt} parsed off a typed "/image ..." line, so
@@ -868,6 +1110,7 @@ function openImageDialog(prefill) {
     document.getElementById("img-model").value = prefill.model;
   }
   imageDialog.showModal();
+  loadSamplers();
   document.getElementById("img-prompt").focus();
 }
 
@@ -881,16 +1124,61 @@ document.getElementById("img-generate").addEventListener("click", () => {
     document.getElementById("img-prompt").focus();
     return;
   }
+  if (imgMode !== "txt2img" && !imgInitB64) {
+    document.getElementById("img-init-drop").style.borderColor = "var(--err)";
+    setTimeout(() => {
+      document.getElementById("img-init-drop").style.borderColor = "";
+    }, 1500);
+    return;
+  }
+  const sizeRaw = document.getElementById("img-size").value;
+  let width = 0, height = 0;
+  if (sizeRaw) {
+    const parts = sizeRaw.split("x");
+    width = parseInt(parts[0], 10); height = parseInt(parts[1], 10);
+  } else if (imgInitNatural) {
+    width = imgInitNatural.width; height = imgInitNatural.height;
+  }
   const stepsRaw = document.getElementById("img-steps").value;
   const seedRaw = document.getElementById("img-seed").value;
+  const cfgRaw = document.getElementById("img-cfg").value;
+  const etaRaw = document.getElementById("img-eta").value;
+  const batchRaw = document.getElementById("img-batch").value;
+  const denoiseRaw = document.getElementById("img-denoise").value;
   const payload = {
     model: document.getElementById("img-model").value,
     prompt: prompt,
     negative_prompt: document.getElementById("img-negative").value.trim(),
-    size: document.getElementById("img-size").value,
+    width: width, height: height,
     steps: stepsRaw ? parseInt(stepsRaw, 10) : 0,
-    seed: seedRaw ? parseInt(seedRaw, 10) : 0,
+    seed: seedRaw ? parseInt(seedRaw, 10) : -1,
+    sampler: document.getElementById("img-sampler").value,
+    scheduler: document.getElementById("img-scheduler").value,
+    rng: document.getElementById("img-rng").value,
+    cfg: cfgRaw ? parseFloat(cfgRaw) : 0,
+    eta: etaRaw === "" ? null : parseFloat(etaRaw),
+    batch_count: batchRaw ? Math.max(1, Math.min(8,
+      parseInt(batchRaw, 10))) : 1,
+    mode: imgMode,
   };
+  if (imgMode !== "txt2img") {
+    payload.init_image_b64 = imgInitB64;
+    payload.denoise_strength = denoiseRaw === ""
+      ? null : parseFloat(denoiseRaw);
+    if (imgMode === "inpaint") {
+      if (!maskHasPaint) {
+        // an empty mask would regenerate the whole image silently --
+        // refuse the exact mistake A1111's users make
+        document.getElementById("img-mask-canvas").style.borderColor =
+          "var(--err)";
+        setTimeout(() => {
+          document.getElementById("img-mask-canvas").style.borderColor = "";
+        }, 1500);
+        return;
+      }
+      payload.mask_b64 = maskCanvas.toDataURL("image/png");
+    }
+  }
   imageDialog.close();
   ws.send(JSON.stringify({ image: payload }));
 });
@@ -1340,13 +1628,13 @@ def main() -> int:
                         continue
                 img = message.get("image")
                 if isinstance(img, dict):
-                    # The image dialog's structured request: the operator
-                    # gets the generate_image tool's whole option surface
-                    # (negative prompt, size, steps, seed), which the
-                    # typed /image command never carried. Runs through the
-                    # session's workspace so the same hooks fire as the
-                    # model-driven path: the progress bar, the image
-                    # frame, the swap chain.
+                    # The image dialog's structured request. Two paths:
+                    # the plain one (no mode) keeps using the model-facing
+                    # generate_image tool; the advanced one (mode set)
+                    # calls imagegen.gen_advanced directly -- img2img,
+                    # inpaint, sampler/scheduler/rng/cfg/batch are
+                    # operator-only surface the tool schema never had.
+                    mode = str(img.get("mode") or "")
                     model = str(img.get("model") or "pony").strip().lower()
                     if model not in ("pony", "qwen", "chroma"):
                         model = "pony"
@@ -1356,6 +1644,100 @@ def main() -> int:
                             "kind": "notice",
                             "text": "image generation needs a prompt"})
                         continue
+                    if mode:
+                        await websocket.send_json({
+                            "kind": "you",
+                            "text": f"/image {mode} {model} {prompt[:80]}"})
+                        await websocket.send_json({"kind": "busy", "on": True})
+
+                        def run_advanced(img=img, model=model, prompt=prompt):
+                            import base64
+                            from pathlib import Path as _Path
+                            import importlib.util as _ilu
+                            spec = _ilu.spec_from_file_location(
+                                "imagegen", REPO / "tools" / "imagegen.py")
+                            if spec is None or spec.loader is None:
+                                class _Missing:
+                                    ok = False
+                                    text = ("imagegen.py could not be "
+                                            "loaded from the repo")
+                                return _Missing()
+                            mod = _ilu.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            out_dir = _Path(
+                                ui.session.workspace.root) / "images"
+                            out_dir.mkdir(parents=True, exist_ok=True)
+                            stamp = int(time.time())
+                            init_path = mask_path = None
+                            if img.get("init_image_b64"):
+                                raw = str(img["init_image_b64"])
+                                if raw.startswith("data:"):
+                                    raw = raw.split(",", 1)[1]
+                                init_path = out_dir / f"init-{stamp}.png"
+                                init_path.write_bytes(base64.b64decode(raw))
+                            if img.get("mask_b64"):
+                                raw = str(img["mask_b64"])
+                                if raw.startswith("data:"):
+                                    raw = raw.split(",", 1)[1]
+                                mask_path = out_dir / f"mask-{stamp}.png"
+                                mask_path.write_bytes(base64.b64decode(raw))
+                            try:
+                                return mod.gen_advanced(
+                                    model=model, prompt=prompt,
+                                    out=str(out_dir / f"{model}-{stamp}.png"),
+                                    negative_prompt=str(
+                                        img.get("negative_prompt") or ""),
+                                    width=int(img.get("width") or 0),
+                                    height=int(img.get("height") or 0),
+                                    steps=int(img.get("steps") or 0),
+                                    seed=int(img.get("seed") or -1),
+                                    sampler=str(img.get("sampler") or ""),
+                                    scheduler=str(img.get("scheduler") or ""),
+                                    rng=str(img.get("rng") or ""),
+                                    cfg=float(img.get("cfg") or 0),
+                                    eta=(None if img.get("eta") is None
+                                         else float(img["eta"])),
+                                    batch_count=int(
+                                        img.get("batch_count") or 1),
+                                    init_image=(str(init_path)
+                                                if init_path else None),
+                                    mask_image=(str(mask_path)
+                                                if mask_path else None),
+                                    denoise_strength=(
+                                        None if img.get("denoise_strength") is None
+                                        else float(img["denoise_strength"])),
+                                    mask_invert=bool(
+                                        img.get("mask_invert") or False),
+                                )
+                            finally:
+                                # the temp uploads are inputs, not results:
+                                # keep the workspace clean of -1.png litter
+                                for temp in (init_path, mask_path):
+                                    if temp is not None:
+                                        try:
+                                            temp.unlink()
+                                        except OSError:
+                                            pass
+
+                        try:
+                            result = await loop.run_in_executor(
+                                None, run_advanced)
+                        except Exception as exc:  # noqa: BLE001
+                            await websocket.send_json({
+                                "kind": "error",
+                                "text": f"image generation failed: {exc}"})
+                            result = None
+                        if result is not None:
+                            if result.ok:
+                                await websocket.send_json({
+                                    "kind": "raw", "text": result.text})
+                            else:
+                                await websocket.send_json({
+                                    "kind": "error", "text": result.text})
+                        await websocket.send_json({"kind": "turn_end"})
+                        await websocket.send_json({"kind": "busy", "on": False})
+                        continue
+                    # plain path: the tool, unchanged
                     args: dict[str, Any] = {"prompt": prompt, "model": model}
                     negative = str(img.get("negative_prompt") or "").strip()
                     if negative:
@@ -1545,10 +1927,28 @@ def main() -> int:
         from rt_harness.docs import docs_index
         return JSONResponse({"index": docs_index(chat_config)})
 
+    async def image_api(request):
+        """A thin same-origin proxy to sd-server (:7860) for the page's
+        read-only fetches (sampler/scheduler lists). The sdapi routes
+        answer only while the card is swapped to images, so a 502 while
+        the llm holds the card is normal and the page treats it as
+        "model default" everywhere."""
+        target = "http://" + (urlparse(config.api_url).hostname
+                               or "127.0.0.1") + ":7860" \
+            + request.url.path.replace("/image-api", "", 1) \
+            + ("?" + str(request.url.query) if request.url.query else "")
+        try:
+            with urllib.request.urlopen(target, timeout=5) as r:
+                return JSONResponse(json.loads(r.read()),
+                                    status_code=r.status)
+        except Exception as exc:  # noqa: BLE001 - not swapped = not there
+            return JSONResponse({"error": str(exc)}, status_code=502)
+
     app = Starlette(routes=[
         Route("/", page),
         Route("/models", models),
         Route("/docs", docs),
+        Route("/image-api/{path:path}", image_api),
         Route("/image/{path:path}", image),
         WebSocketRoute("/ws", ws_endpoint),
     ])
