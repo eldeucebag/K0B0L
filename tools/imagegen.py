@@ -308,6 +308,266 @@ def _slug(text: str, width: int = 24) -> str:
     return (out[:width]).strip("-") or "image"
 
 
+def _start_progress_ticker() -> dict:
+    """The shared progress state + its polling thread, per gen_via_api.
+
+    ``done`` flips True when the HTTP request closes; the daemon prints
+    PROGRESS n/m and PHASE lines to stderr while it waits, which the
+    harness's stream reader turns into gen_progress hook events.
+    """
+    import threading
+
+    state: dict = {"progress": None, "phase": None, "done": False}
+    if swap_available():
+        threading.Thread(target=_ticker_body, args=(state,),
+                         daemon=True).start()
+    return state
+
+
+def _ticker_body(state: dict) -> None:
+    last_change = time.time()
+    seen_steps = False
+    while not state["done"]:
+        progress = swap_progress()
+        if progress:
+            seen_steps = True
+        if progress != state["progress"]:
+            state["progress"] = progress
+            last_change = time.time()
+            if progress:
+                print(f"PROGRESS {progress['step']}/{progress['total']}",
+                      file=sys.stderr, flush=True)
+        if progress and time.time() - last_change > 45:
+            phase = "finalizing (VAE decode / save)"
+        elif progress:
+            phase = None
+        elif seen_steps:
+            phase = "finalizing (VAE decode / save)"
+        else:
+            phase = "preparing (loading / text-encoding)"
+        if phase != state["phase"]:
+            state["phase"] = phase
+            if phase:
+                print(f"PHASE {phase}", file=sys.stderr, flush=True)
+        time.sleep(2)
+
+
+def gen_advanced(model: str, prompt: str, out: str,
+                 negative_prompt: str = "", width: int = 1024,
+                 height: int = 1024, steps: int = 0, seed: int = -1,
+                 sampler: str = "", scheduler: str = "", rng: str = "",
+                 cfg: float = 0.0, eta: float | None = None,
+                 batch_count: int = 1, init_image: str | None = None,
+                 mask_image: str | None = None,
+                 denoise_strength: float | None = None,
+                 mask_invert: bool = False,
+                 custom_sigmas: list | None = None) -> bool:
+    """Full-control generation: txt2img / img2img / inpaint over sdapi.
+
+    The operator-facing surface ComfyUI/A1111 expose, mapped onto
+    sd.cpp's own API: AUTOMATIC1111-shaped ``/sdapi/v1/txt2img`` or
+    ``/img2img`` (init image, mask, denoising strength, sampler_name,
+    scheduler, cfg_scale, batch), with the OpenAI-shaped
+    ``/v1/images/generations`` as the fallback for older sd-server
+    builds (its native knobs ride inside the prompt, same as
+    :func:`gen_via_api`).
+
+    ``rng``: the server's --rng is a STARTUP flag (std_default, cuda,
+    cpu) and the sdapi body carries no equivalent; the only
+    request-body-reachable RNG knob is ``brownian_tree_rng`` inside
+    ``extra_sample_args``, which applies only to the brownian-tree
+    noise sampler of noise-injecting samplers (e.g. dpm++2m_sde_bt).
+    The parameter is kept for the day a body field exists and wired
+    into the extra-args payload under that name; until then choosing
+    it here changes nothing for plain samplers, by design -- a silent
+    no-op is what the server itself would do with an unknown key.
+
+    Returns True and writes ``out`` (batch > 1: ``out-N.png``) on
+    success; False with the reason on stderr otherwise. The GPU swap
+    chain follows gen()'s rule exactly: the card must end on the llm
+    service, whoever swapped it over.
+    """
+    import base64
+    import json
+    import urllib.error
+    import urllib.request
+    from pathlib import Path as _P
+
+    if model not in FILES:
+        print(f"unknown model {model!r}: {'/'.join(FILES)}", file=sys.stderr)
+        return False
+    out_path = _P(out).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    init_b64 = mask_b64 = ""
+    if init_image:
+        try:
+            raw = _P(init_image).read_bytes()
+            init_b64 = "data:image/png;base64," + base64.b64encode(raw).decode()
+        except OSError as exc:
+            print(f"could not read init image {init_image}: {exc}",
+                  file=sys.stderr)
+            return False
+    if mask_image:
+        try:
+            raw = _P(mask_image).read_bytes()
+            mask_b64 = "data:image/png;base64," + base64.b64encode(raw).decode()
+        except OSError as exc:
+            print(f"could not read mask image {mask_image}: {exc}",
+                  file=sys.stderr)
+            return False
+
+    # -- the swap chain, verbatim from gen() --------------------------------
+    via_swap = False
+    if not api_up() and swap_available():
+        print(f"[{model}] swapping the GPU to image service "
+              f"(llm pauses)...", file=sys.stderr)
+        if swap_to_image(model):
+            via_swap = True
+        else:
+            print("the swap supervisor could not start the image service",
+                  file=sys.stderr)
+    elif api_up() and swap_available():
+        resident = _resident_image_model()
+        if resident and resident != model:
+            print(f"[{model}] image service has {resident!r} resident; "
+                  f"swapping to {model}...", file=sys.stderr)
+            if swap_to_image(model):
+                via_swap = True
+            else:
+                print(f"the swap supervisor could not load {model}; "
+                      f"generating with {resident}", file=sys.stderr)
+
+    def swap_back_if_ours() -> None:
+        state = _swap_state()
+        if via_swap or (state and not state.get("llm", True)):
+            print("swapping the GPU back to the llm service...",
+                  file=sys.stderr)
+            swap_back_to_llm()
+
+    if not api_up():
+        if via_swap:
+            swap_back_if_ours()
+        print("the image api is unreachable; img2img/inpaint need sd-server "
+              "(the local diffusers fallback does not take these controls)",
+              file=sys.stderr)
+        return False
+
+    # -- the request ---------------------------------------------------------
+    ticker = _start_progress_ticker()
+    try:
+        body: dict = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "width": int(width) or 1024,
+            "height": int(height) or 1024,
+            "seed": int(seed),
+            "batch_size": max(1, min(8, int(batch_count))),
+        }
+        if steps:
+            body["steps"] = int(steps)
+        if cfg:
+            body["cfg_scale"] = float(cfg)
+        if sampler:
+            body["sampler_name"] = sampler
+        if scheduler:
+            body["scheduler"] = scheduler
+        extra: dict = {"sample_params": {}, "extra_sample_args": {}}
+        if eta is not None:
+            extra["sample_params"]["eta"] = float(eta)
+        if custom_sigmas:
+            extra["sample_params"]["custom_sigmas"] = list(custom_sigmas)
+        if rng:
+            # the one body-reachable RNG knob; only meaningful for
+            # noise-injecting samplers using the brownian-tree noise
+            extra["extra_sample_args"]["brownian_tree_rng"] = rng
+        if init_b64:
+            body["init_images"] = [init_b64]
+            body["denoising_strength"] = (
+                0.75 if denoise_strength is None
+                else max(0.0, min(1.0, float(denoise_strength))))
+            if mask_b64:
+                body["mask"] = mask_b64
+                body["inpainting_mask_invert"] = 1 if mask_invert else 0
+        if extra["sample_params"] or extra["extra_sample_args"]:
+            import json as _json
+            body["prompt"] = (
+                prompt + " <sd_cpp_extra_args>"
+                + _json.dumps(extra) + "</sd_cpp_extra_args>")
+
+        route = "img2img" if init_b64 else "txt2img"
+        url = IMAGE_API.rstrip("/") + f"/sdapi/v1/{route}"
+        request = urllib.request.Request(
+            url, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        print(f"[{model}] via sdapi /{route}...", file=sys.stderr)
+        try:
+            with urllib.request.urlopen(request, timeout=1800) as response:
+                data = json.loads(response.read())
+            images = [b for b in (data.get("images") or [])
+                      if isinstance(b, str)]
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 405):
+                # older sd-server: fall back to the OpenAI-shaped route
+                print("sdapi route absent; falling back to "
+                      "/v1/images/generations", file=sys.stderr)
+                v1 = {
+                    "prompt": body["prompt"],
+                    "n": body["batch_size"],
+                    "size": f"{body['width']}x{body['height']}",
+                    "output_format": "png",
+                }
+                request = urllib.request.Request(
+                    IMAGE_API.rstrip("/") + "/v1/images/generations",
+                    data=json.dumps(v1).encode(),
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=1800) as response:
+                    data = json.loads(response.read())
+                rows = data.get("data") or []
+                images = [str(r.get("b64_json") or "")
+                          for r in rows if r.get("b64_json")]
+            else:
+                detail = exc.read().decode("utf-8", "replace")[:300]
+                print(f"image api: HTTP {exc.code}: {detail}",
+                      file=sys.stderr)
+                swap_back_if_ours()
+                return False
+        except Exception as exc:  # noqa: BLE001
+            print(f"image api unreachable: {exc}", file=sys.stderr)
+            swap_back_if_ours()
+            return False
+    finally:
+        ticker["done"] = True
+
+    if not images:
+        print("the image api returned no images", file=sys.stderr)
+        swap_back_if_ours()
+        return False
+
+    written = 0
+    stem = out_path.with_suffix("")
+    for index, encoded in enumerate(images, start=1):
+        if encoded.startswith("data:"):
+            encoded = encoded.split(",", 1)[1]
+        try:
+            blob = base64.b64decode(encoded)
+        except Exception as exc:  # noqa: BLE001
+            print(f"batch item {index} was not base64: {exc}", file=sys.stderr)
+            continue
+        if len(blob) < 50:
+            print(f"batch item {index} is suspiciously small; skipped",
+                  file=sys.stderr)
+            continue
+        target = out_path if len(images) == 1 else \
+            _P(f"{stem}-{index}.png")
+        target.write_bytes(blob)
+        print(f"saved {target}")
+        written += 1
+
+    swap_back_if_ours()
+    return written > 0
+
+
 def _swap_state() -> dict:
     """The supervisor's ``/state``, or an empty dict when it cannot answer."""
     import json

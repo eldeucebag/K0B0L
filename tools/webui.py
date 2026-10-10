@@ -17,6 +17,7 @@ Run:  python3 tools/webui.py            (http://LAN:8321)
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import threading
 import time
@@ -1649,50 +1650,55 @@ def main() -> int:
                             "kind": "you",
                             "text": f"/image {mode} {model} {prompt[:80]}"})
                         await websocket.send_json({"kind": "busy", "on": True})
-
-                        def run_advanced(img=img, model=model, prompt=prompt):
-                            import base64
-                            from pathlib import Path as _Path
-                            import importlib.util as _ilu
-                            spec = _ilu.spec_from_file_location(
-                                "imagegen", REPO / "tools" / "imagegen.py")
-                            if spec is None or spec.loader is None:
-                                class _Missing:
-                                    ok = False
-                                    text = ("imagegen.py could not be "
-                                            "loaded from the repo")
-                                return _Missing()
-                            mod = _ilu.module_from_spec(spec)
-                            spec.loader.exec_module(mod)
-                            out_dir = _Path(
-                                ui.session.workspace.root) / "images"
-                            out_dir.mkdir(parents=True, exist_ok=True)
-                            stamp = int(time.time())
-                            init_path = mask_path = None
+                        out_dir = Path(
+                            str(ui.session.workspace.root)) / "images"
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        stamp = int(time.time())
+                        out_name = f"{model}-{stamp}"
+                        init_path = mask_path = None
+                        try:
                             if img.get("init_image_b64"):
                                 raw = str(img["init_image_b64"])
                                 if raw.startswith("data:"):
                                     raw = raw.split(",", 1)[1]
                                 init_path = out_dir / f"init-{stamp}.png"
-                                init_path.write_bytes(base64.b64decode(raw))
+                                init_path.write_bytes(
+                                    base64.b64decode(raw))
                             if img.get("mask_b64"):
                                 raw = str(img["mask_b64"])
                                 if raw.startswith("data:"):
                                     raw = raw.split(",", 1)[1]
                                 mask_path = out_dir / f"mask-{stamp}.png"
-                                mask_path.write_bytes(base64.b64decode(raw))
-                            try:
+                                mask_path.write_bytes(
+                                    base64.b64decode(raw))
+
+                            def run_advanced(
+                                    img=img, model=model, prompt=prompt,
+                                    out_dir=out_dir, stamp=stamp,
+                                    init_path=init_path, mask_path=mask_path):
+                                import importlib.util as _ilu
+                                spec = _ilu.spec_from_file_location(
+                                    "imagegen",
+                                    REPO / "tools" / "imagegen.py")
+                                if spec is None or spec.loader is None:
+                                    raise RuntimeError(
+                                        "imagegen.py could not be loaded")
+                                mod = _ilu.module_from_spec(spec)
+                                spec.loader.exec_module(mod)
                                 return mod.gen_advanced(
                                     model=model, prompt=prompt,
-                                    out=str(out_dir / f"{model}-{stamp}.png"),
+                                    out=str(out_dir /
+                                            f"{model}-{stamp}.png"),
                                     negative_prompt=str(
                                         img.get("negative_prompt") or ""),
                                     width=int(img.get("width") or 0),
                                     height=int(img.get("height") or 0),
                                     steps=int(img.get("steps") or 0),
                                     seed=int(img.get("seed") or -1),
-                                    sampler=str(img.get("sampler") or ""),
-                                    scheduler=str(img.get("scheduler") or ""),
+                                    sampler=str(
+                                        img.get("sampler") or ""),
+                                    scheduler=str(
+                                        img.get("scheduler") or ""),
                                     rng=str(img.get("rng") or ""),
                                     cfg=float(img.get("cfg") or 0),
                                     eta=(None if img.get("eta") is None
@@ -1704,36 +1710,76 @@ def main() -> int:
                                     mask_image=(str(mask_path)
                                                 if mask_path else None),
                                     denoise_strength=(
-                                        None if img.get("denoise_strength") is None
-                                        else float(img["denoise_strength"])),
+                                        None
+                                        if img.get("denoise_strength") is None
+                                        else float(
+                                            img["denoise_strength"])),
                                     mask_invert=bool(
                                         img.get("mask_invert") or False),
                                 )
-                            finally:
-                                # the temp uploads are inputs, not results:
-                                # keep the workspace clean of -1.png litter
-                                for temp in (init_path, mask_path):
-                                    if temp is not None:
-                                        try:
-                                            temp.unlink()
-                                        except OSError:
-                                            pass
 
-                        try:
-                            result = await loop.run_in_executor(
-                                None, run_advanced)
+                            # gen_advanced runs in-process, so its stderr
+                            # markers land on OUR console, not in a pipe
+                            # the harness reads -- poll the supervisor for
+                            # progress directly and stream frames while
+                            # the executor works.
+                            async def poll_progress() -> None:
+                                last = None
+                                while True:
+                                    await asyncio.sleep(2)
+                                    try:
+                                        with urllib.request.urlopen(
+                                                swap_api + "/progress",
+                                                timeout=2) as r:
+                                            progress = json.loads(
+                                                r.read()).get("progress")
+                                    except Exception:  # noqa: BLE001
+                                        progress = None
+                                    if progress and progress != last:
+                                        last = progress
+                                        await websocket.send_json({
+                                            "kind": "gen_progress",
+                                            "phase": "sampling",
+                                            "step": progress["step"],
+                                            "total": progress["total"]})
+                            progress_task = asyncio.ensure_future(
+                                poll_progress())
+                            try:
+                                ok = await loop.run_in_executor(
+                                    None, run_advanced)
+                            finally:
+                                progress_task.cancel()
+                            if ok:
+                                saved = sorted(
+                                    out_dir.glob(f"{model}-{stamp}*.png"))
+                                for path in saved:
+                                    await websocket.send_json({
+                                        "kind": "image",
+                                        "path": f"images/{path.name}"})
+                                await websocket.send_json({
+                                    "kind": "raw",
+                                    "text": (f"image saved to images/"
+                                             f"{out_name}.png"
+                                             + (f" (+{len(saved) - 1} more)"
+                                                if len(saved) > 1 else ""))})
+                            else:
+                                await websocket.send_json({
+                                    "kind": "error",
+                                    "text": "image generation failed; see "
+                                            "the server log"})
                         except Exception as exc:  # noqa: BLE001
+                            # A dead turn must not kill the socket: every
+                            # path below still closes the turn.
                             await websocket.send_json({
                                 "kind": "error",
                                 "text": f"image generation failed: {exc}"})
-                            result = None
-                        if result is not None:
-                            if result.ok:
-                                await websocket.send_json({
-                                    "kind": "raw", "text": result.text})
-                            else:
-                                await websocket.send_json({
-                                    "kind": "error", "text": result.text})
+                        finally:
+                            for temp in (init_path, mask_path):
+                                if temp is not None:
+                                    try:
+                                        temp.unlink()
+                                    except OSError:
+                                        pass
                         await websocket.send_json({"kind": "turn_end"})
                         await websocket.send_json({"kind": "busy", "on": False})
                         continue
