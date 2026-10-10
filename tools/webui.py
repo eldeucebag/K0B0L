@@ -168,6 +168,33 @@ header .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
 }
 .busyclock { color: var(--faint); margin-left: 8px; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* markdown-rendered prose: the renderer emits real tags and <br>, so
+   pre-wrap would double-space every line */
+.prose.md { white-space: normal; }
+.prose.md p { margin: 0 0 0.5em; }
+.prose.md p:last-child { margin-bottom: 0; }
+.prose.md h1, .prose.md h2, .prose.md h3, .prose.md h4 {
+  margin: 0.7em 0 0.3em; line-height: 1.3; }
+.prose.md h1 { font-size: 1.3em; } .prose.md h2 { font-size: 1.18em; }
+.prose.md h3 { font-size: 1.08em; } .prose.md h4 { font-size: 1em; }
+.prose.md code {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0.05em 0.35em; font: 0.9em var(--mono);
+}
+.prose.md a { color: var(--accent); }
+.prose.md ul, .prose.md ol { margin: 0.3em 0 0.6em; padding-left: 1.5em; }
+.prose.md blockquote {
+  border-left: 3px solid var(--border); margin: 0.45em 0;
+  padding: 0.1em 0.9em; color: var(--muted);
+}
+.prose.md table { border-collapse: collapse; margin: 0.5em 0;
+  display: block; overflow-x: auto; }
+.prose.md th, .prose.md td {
+  border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+.prose.md th { color: var(--muted); font-family: var(--mono);
+  font-size: 0.85em; }
+.prose.md hr { border: 0; border-top: 1px solid var(--border);
+  margin: 0.8em 0; }
 details { background: var(--band); border-radius: 8px; }
 details summary {
   cursor: pointer; padding: 6px 12px; color: var(--muted);
@@ -606,6 +633,15 @@ let typingEl = null;
 let busyTimer = null;
 let busyStart = null;
 let busy = false;
+let proseRaw = "";   // un-marked-up model text for the open prose block
+
+function paintProse() {
+  // Repaint the open prose block from its raw markdown on every delta
+  // (chat streams partial lines; a partial **bold is still plain text
+  // until its closing ** arrives, so render from source each time).
+  if (!proseEl) { proseEl = el("div", "prose md"); }
+  proseEl.innerHTML = renderMarkdown(proseRaw);
+}
 
 function setBusy(on) {
   // Remember the request across reconnects and element churn: a busy
@@ -724,6 +760,127 @@ function artifactButtons(frame, opts) {
   turn.appendChild(bar);
 }
 
+// -- markdown: escape-first, vendored, chat-grade --------------------------
+// Model prose is untrusted in this harness -- everything is HTML-escaped
+// BEFORE any tag is inserted, inline code is stashed out of the other
+// rules, and link hrefs only ever begin with http(s):// so a
+// javascript: URL cannot ride through. No CDN: the page stays
+// self-contained.
+function escapeHtml(s) {
+  // The entities are spelled with \\u escapes in the source so this
+  // file's PAGE string never carries a bare ampersand or quote
+  // entity -- Python would eat them at page-build time (the same
+  // class of bug as the \\n that once killed the whole script).
+  return String(s)
+    .replace(/&/g, "\\u0026amp;")
+    .replace(/</g, "\\u0026lt;")
+    .replace(/>/g, "\\u0026gt;")
+    .replace(/"/g, "\\u0026quot;");
+}
+
+function renderInline(s) {
+  const stash = [];
+  s = s.replace(/`([^`]+)`/g, (m, c) => {
+    stash.push("<code>" + c + "</code>");
+    return "\u0000" + (stash.length - 1) + "\u0000";
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[\s(])\*([^*\s][^*]*?)\*/g, "$1<em>$2</em>");
+  s = s.replace(/(^|[\s(])_([^_\s][^_]*?)_(?=$|[\s).,;:!?])/g,
+                "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                '<a href="$2" target="_blank" ' +
+                'rel="noopener noreferrer">$1</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[Number(i)]);
+  return s;
+}
+
+function renderMarkdown(src) {
+  // Block pass. NOTE: text is escaped first, so ">" arrives as
+  // \u0026gt; and the blockquote pattern must match that. The line
+  // separator uses fromCharCode for the same reason as everywhere in
+  // this file: a literal \\n inside the PAGE string is consumed by
+  // Python at page-build time.
+  const lines = escapeHtml(src)
+    .split(String.fromCharCode(10));
+  let html = "";
+  let para = [];
+  let list = null;
+  let items = [];
+  let quote = null;
+  const cells = (row) => row.replace(/^\s*\|/, "").replace(/\|\s*$/, "")
+    .split("|").map((c) => renderInline(c.trim()));
+  const flushPara = () => {
+    if (para.length) {
+      html += "<p>" + para.map(renderInline).join("<br>") + "</p>";
+      para = [];
+    }
+  };
+  const flushList = () => {
+    if (list) {
+      html += "<" + list + ">" +
+        items.map((i) => "<li>" + renderInline(i) + "</li>").join("") +
+        "</" + list + ">";
+      list = null; items = [];
+    }
+  };
+  const flushQuote = () => {
+    if (quote) {
+      html += "<blockquote>" +
+        quote.map(renderInline).join("<br>") + "</blockquote>";
+      quote = null;
+    }
+  };
+  const flushAll = () => { flushPara(); flushList(); flushQuote(); };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m;
+    if ((m = /^(#{1,6})\s+(.*)$/.exec(line))) {
+      flushAll();
+      const n = Math.min(4, m[1].length);
+      html += "<h" + n + ">" + renderInline(m[2]) + "</h" + n + ">";
+    } else if (/^\s*(?:---+|\*\*\*)\s*$/.test(line)) {
+      flushAll(); html += "<hr>";
+    } else if (/^\u0026gt;\s?(.*)$/.test(line)) {
+      flushPara(); flushList();
+      quote = quote || [];
+      quote.push(/^\u0026gt;\s?(.*)$/.exec(line)[1]);
+    } else if (/^\s*[-*]\s+(.*)$/.test(line)) {
+      flushPara(); flushQuote();
+      if (list !== "ul") { flushList(); list = "ul"; }
+      items.push(/^\s*[-*]\s+(.*)$/.exec(line)[1]);
+    } else if (/^\s*\d+\.\s+(.*)$/.test(line)) {
+      flushPara(); flushQuote();
+      if (list !== "ol") { flushList(); list = "ol"; }
+      items.push(/^\s*\d+\.\s+(.*)$/.exec(line)[1]);
+    } else if (line.indexOf("|") >= 0 && i + 1 < lines.length &&
+               /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])) {
+      // a GFM table: header row, separator row, body rows
+      flushAll();
+      const head = cells(line);
+      i += 2;
+      let body = "";
+      while (i < lines.length && lines[i].indexOf("|") >= 0) {
+        const row = cells(lines[i]);
+        body += "<tr>" +
+          row.map((c) => "<td>" + c + "</td>").join("") + "</tr>";
+        i++;
+      }
+      i--;  // the outer loop increments
+      html += "<table><thead><tr>" +
+        head.map((c) => "<th>" + c + "</th>").join("") +
+        "</tr></thead><tbody>" + body + "</tbody></table>";
+    } else if (!line.trim()) {
+      flushAll();
+    } else {
+      flushList(); flushQuote();
+      para.push(line);
+    }
+  }
+  flushAll();
+  return html || "<p></p>";
+}
+
 function newTurn() {
   turn = document.createElement("div");
   turn.className = "turn";
@@ -773,7 +930,7 @@ ws.onmessage = (ev) => {
       // whatever proseEl holds -- without this reset the model's words
       // stream into the *user's* reply block.
       newTurn();
-      proseEl = null; thinkEl = null; genBar = null; genLabel = null;
+      proseEl = null; proseRaw = ""; thinkEl = null; genBar = null; genLabel = null;
       whoEl = who(m.thinking ? "model (thinking)" : "model");
       typingEl = document.createElement("span");
       typingEl.className = "typing";
@@ -788,8 +945,9 @@ ws.onmessage = (ev) => {
       setBusy(m.on);
       break;
     case "delta":
-      if (!proseEl) { proseEl = el("div", "prose"); }
-      proseEl.textContent += m.text; scroll();
+      if (!proseEl) { proseEl = el("div", "prose md"); }
+      proseRaw += m.text;
+      paintProse(); scroll();
       break;
     case "thinking":
       if (!thinkEl) {
@@ -806,12 +964,12 @@ ws.onmessage = (ev) => {
     case "tool_call":
       // A panel ends any open prose/thinking run: later deltas must
       // create fresh elements so the transcript order matches the frames.
-      proseEl = null; thinkEl = null;
+      proseEl = null; proseRaw = ""; thinkEl = null;
       el("div", "tool call", m.text); scroll(); break;
     case "tool_result":
       const r = el("div", "tool result" + (m.ok ? "" : " error"));
       r.textContent = m.text;
-      proseEl = null; thinkEl = null; scroll(); break;
+      proseEl = null; proseRaw = ""; thinkEl = null; scroll(); break;
     case "code":
       ensureTurn();
       const cd = document.createElement("details");
@@ -823,7 +981,7 @@ ws.onmessage = (ev) => {
       pre.textContent = m.text;
       bd.appendChild(pre); cd.appendChild(sum); cd.appendChild(bd);
       turn.appendChild(cd);
-      proseEl = null; thinkEl = null; scroll(); break;
+      proseEl = null; proseRaw = ""; thinkEl = null; scroll(); break;
     case "notice":
       el("div", "notice", m.text); scroll(); break;
     case "error":
@@ -876,7 +1034,7 @@ ws.onmessage = (ev) => {
         copyPrompt: req ? JSON.stringify(req, null, 2) : undefined,
         copyPromptIsJson: !!req,
       });
-      proseEl = null; thinkEl = null;
+      proseEl = null; proseRaw = ""; thinkEl = null;
       genBar = null;
       scroll();
       break;
@@ -911,7 +1069,7 @@ ws.onmessage = (ev) => {
       break;
     case "turn_end":
       setBusy(false);
-      turn = null; proseEl = null; thinkEl = null;
+      turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null;
       send.disabled = false; input.focus();
       persistCache();
@@ -921,7 +1079,7 @@ ws.onmessage = (ev) => {
       // restored transcript is painted exactly once.
       restoring = true;
       transcript.innerHTML = "";
-      turn = null; proseEl = null; thinkEl = null;
+      turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null; genBar = null; genLabel = null;
       break;
     case "restore_end":
@@ -930,7 +1088,7 @@ ws.onmessage = (ev) => {
       break;
     case "clear":
       transcript.innerHTML = "";
-      turn = null; proseEl = null; thinkEl = null;
+      turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null; genBar = null; genLabel = null;
       try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
       break;
@@ -1026,7 +1184,7 @@ function restoreCache() {
         proseEl.textContent = row.text;
       }
     }
-    turn = null; proseEl = null; thinkEl = null;
+    turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
     return true;
   } catch (err) { return false; }
 }
@@ -1079,7 +1237,7 @@ function renderSessionList(entries) {
         // copy too, or a repaint resurrects it
         try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
         transcript.innerHTML = "";
-        turn = null; proseEl = null; thinkEl = null;
+        turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
         whoEl = null; typingEl = null; genBar = null; genLabel = null;
       }
       setTimeout(() => ws.send(JSON.stringify(
