@@ -212,9 +212,17 @@ pre.code {
   font-family: var(--mono); text-align: right; }
 img.gen { max-width: min(100%, 560px); border-radius: 8px;
   border: 1px solid #1d2330; display: block; }
-figure { margin: 0; }
+figure { margin: 0; position: relative; }
 figcaption { color: var(--faint); font-size: 11.5px;
   font-family: var(--mono); margin-top: 4px; }
+.img-del {
+  position: absolute; top: 6px; right: 6px;
+  background: var(--band); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  width: 22px; height: 22px; line-height: 1; cursor: pointer;
+  font-size: 12px; padding: 0;
+}
+.img-del:hover { color: var(--err); border-color: var(--err); }
 form { display: flex; gap: 10px; padding: 12px 16px;
   border-top: 1px solid #1d2330; background: var(--surface); }
 #input {
@@ -752,6 +760,24 @@ ws.onmessage = (ev) => {
       const cap = document.createElement("figcaption");
       cap.textContent = m.path + (m.label ? " · " + m.label : "");
       fig.appendChild(cap);
+      const del = document.createElement("button");
+      del.className = "img-del";
+      del.title = "delete this image";
+      del.textContent = "✕";
+      del.addEventListener("click", () => {
+        if (!del.dataset.confirmed) {
+          del.dataset.confirmed = "1";
+          del.textContent = "sure?";
+          setTimeout(() => {
+            del.dataset.confirmed = "";
+            del.textContent = "✕";
+          }, 2500);
+          return;
+        }
+        ws.send(JSON.stringify({ image_delete: m.path }));
+        fig.remove();
+      });
+      fig.appendChild(del);
       turn.appendChild(fig);
       proseEl = null; thinkEl = null;
       genBar = null;
@@ -951,6 +977,14 @@ function renderSessionList(entries) {
     delBtn.title = "delete";
     delBtn.addEventListener("click", () => {
       ws.send(JSON.stringify({ session: { verb: "delete", name: s.name } }));
+      if (s.name === "__webui_last__") {
+        // the live conversation is gone server-side: drop the local
+        // copy too, or a repaint resurrects it
+        try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
+        transcript.innerHTML = "";
+        turn = null; proseEl = null; thinkEl = null;
+        whoEl = null; typingEl = null; genBar = null; genLabel = null;
+      }
       setTimeout(() => ws.send(JSON.stringify(
         { session: { verb: "list" } })), 200);
     });
@@ -1626,6 +1660,13 @@ def main() -> int:
                         ok, note = sessions.delete(name)
                         await websocket.send_json({
                             "kind": "notice", "text": note})
+                        # A deleted session must not resurrect from the
+                        # page's cache: if it was the live autosave,
+                        # reset the engine too, or the very next turn
+                        # re-autosaves the zombie conversation.
+                        if ok and name == SessionManager.AUTOSAVE:
+                            ui.session.reset()
+                            await websocket.send_json({"kind": "clear"})
                         continue
                 img = message.get("image")
                 if isinstance(img, dict):
@@ -1646,10 +1687,23 @@ def main() -> int:
                             "text": "image generation needs a prompt"})
                         continue
                     if mode:
+                        # The user's own row echoes the request whole --
+                        # a truncated echo reads as a truncated prompt.
                         await websocket.send_json({
                             "kind": "you",
-                            "text": f"/image {mode} {model} {prompt[:80]}"})
+                            "text": f"/image {mode} {model} {prompt}"})
+                        # An image turn is still a turn: the assistant row
+                        # anchors the busy dots, and an immediate
+                        # indeterminate bar says "generating" through the
+                        # minutes of swap + weight load before any
+                        # sampling step exists to report.
+                        await websocket.send_json({"kind": "assistant"})
                         await websocket.send_json({"kind": "busy", "on": True})
+                        await websocket.send_json({
+                            "kind": "gen_progress",
+                            "phase": "generating image — preparing "
+                                     "(swap / weight load)",
+                            "step": 0, "total": 0})
                         out_dir = Path(
                             str(ui.session.workspace.root)) / "images"
                         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1725,6 +1779,9 @@ def main() -> int:
                             # the executor works.
                             async def poll_progress() -> None:
                                 last = None
+                                last_phase = None
+                                last_change = time.time()
+                                seen_steps = False
                                 while True:
                                     await asyncio.sleep(2)
                                     try:
@@ -1735,13 +1792,36 @@ def main() -> int:
                                                 r.read()).get("progress")
                                     except Exception:  # noqa: BLE001
                                         progress = None
-                                    if progress and progress != last:
-                                        last = progress
+                                    phase = None
+                                    if progress:
+                                        seen_steps = True
+                                        if progress != last:
+                                            last = progress
+                                            last_change = time.time()
+                                            await websocket.send_json({
+                                                "kind": "gen_progress",
+                                                "phase": "sampling",
+                                                "step": progress["step"],
+                                                "total": progress["total"]})
+                                        if time.time() - last_change > 45:
+                                            # steps stalled: VAE decode
+                                            phase = ("finalizing "
+                                                     "(VAE decode / save)")
+                                    elif seen_steps:
+                                        # steps ran, then progress went
+                                        # away: the completion marker
+                                        phase = ("finalizing "
+                                                 "(VAE decode / save)")
+                                    else:
+                                        phase = ("generating image — "
+                                                 "preparing (swap / "
+                                                 "weight load)")
+                                    if phase and phase != last_phase:
+                                        last_phase = phase
                                         await websocket.send_json({
                                             "kind": "gen_progress",
-                                            "phase": "sampling",
-                                            "step": progress["step"],
-                                            "total": progress["total"]})
+                                            "phase": phase,
+                                            "step": 0, "total": 0})
                             progress_task = asyncio.ensure_future(
                                 poll_progress())
                             try:
@@ -1832,6 +1912,33 @@ def main() -> int:
                                 "kind": "error", "text": result.text})
                     await websocket.send_json({"kind": "turn_end"})
                     await websocket.send_json({"kind": "busy", "on": False})
+                    continue
+                img_del = message.get("image_delete")
+                if isinstance(img_del, str) and img_del.strip():
+                    # Images are workspace files the operator owns; the
+                    # path is confined exactly like the /image route.
+                    rel = img_del.strip()
+                    target = (chat_config.root / rel).resolve()
+                    if not str(target).startswith(
+                            str(chat_config.root.resolve())):
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": "refusing to delete outside the "
+                                    "workspace"})
+                    elif target.is_file():
+                        try:
+                            target.unlink()
+                            await websocket.send_json({
+                                "kind": "notice",
+                                "text": f"deleted {rel}"})
+                        except OSError as exc:
+                            await websocket.send_json({
+                                "kind": "notice",
+                                "text": f"could not delete {rel}: {exc}"})
+                    else:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": f"no such image {rel}"})
                     continue
                 wanted_theme = message.get("theme")
                 if isinstance(wanted_theme, str) and wanted_theme in WEB_THEMES:
