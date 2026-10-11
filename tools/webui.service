@@ -1,0 +1,14 @@
+[Unit]
+Description=K0B0L web UI (tools/webui.py on :8321)
+After=network.target
+
+[Service]
+Type=simple
+User=jeff
+WorkingDirectory=/home/jeff/redtram
+ExecStart=/usr/bin/python3 /home/jeff/redtram/tools/webui.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
