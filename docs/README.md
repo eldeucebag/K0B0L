@@ -9,6 +9,9 @@ can fetch any of these with the `read_docs` tool; you can read one with
 | --- | --- |
 | `commands` | Every slash command, and the CLI flags that mirror them |
 | `chat` | The three front ends, tools, sessions, and how a turn works |
+| `webui` | The browser front end: running it, what it renders, refresh-proof generations |
+| `imagegen` | Local image generation: models, swap, txt2img/img2img/inpaint |
+| `gpu-services` | The GPU box's systemd services and the swap API |
 | `runs` | The attack cycle: starting, watching, stopping, and what lands on disk |
 | `modes` | The seven attack modes and the idea behind each |
 | `deployments` | Mounting a target under a model family's stock system prompt |

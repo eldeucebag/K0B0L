@@ -10,10 +10,13 @@ terminal can carry. Start it with `thinlizzy.py --chat`.
 | Textual app | `textual` and `rich` are installed | — |
 | Rich line mode | `rich` is installed, `textual` is not | `--chat-plain` |
 | Plain line mode | neither is installed | — |
+| Browser UI | whenever you want pixels | `python3 tools/webui.py` (see `docs/webui`) |
 
-All three are the same session underneath: one `ChatSession`, one transcript, one
+All four are the same session underneath: one `ChatSession`, one transcript, one
 set of commands. The Textual app adds the menu bar, the modal panes (help, paste,
-file picker, run wizard), the command palette (ctrl-p), and themes.
+file picker, run wizard), the command palette (ctrl-p), and themes. The browser
+UI adds inline images, the image dialog, and a layout that holds any window
+size.
 
 ## A turn
 

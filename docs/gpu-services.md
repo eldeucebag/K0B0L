@@ -1,18 +1,20 @@
 # GPU-box service layout (systemd)
 
-This box serves **both** inference surfaces to the network — text on
-:11434, images on :7860 — from one 8 GB card. Two systemd units own the
-processes so everything survives a reboot:
+This box serves **all three** K0B0L surfaces to the network — text on
+:11434, images on :7860, the web UI on :8321 — from one 8 GB card. Three
+systemd units own the processes so everything survives a reboot:
 
 ```bash
 sudo systemctl status k0b0l-swap    # the supervisor (:7861)
 sudo systemctl status k0b0l-llama    # the llama router (:11434)
+sudo systemctl status k0b0l-webui    # the browser UI (:8321)
 ```
 
 | unit | port | role |
 | --- | --- | --- |
-| `k0b0l-swap` | 7861 | the swap supervisor (`tools/gpu_swap_server.py`); owns both services, swaps the card on request |
+| `k0b0l-swap` | 7861 | the swap supervisor (`tools/gpu_swap_server.py`); owns both GPU services, swaps the card on request |
 | `k0b0l-llama` | 11434 | llama-server router, models loaded on demand (`models.ini`, `--models-max 1`) |
+| `k0b0l-webui` | 8321 | the browser front end (`tools/webui.py`); no GPU, `Restart=always` |
 | *(on demand)* | 7860 | `sd-server` (sd.cpp), one image model resident, started by the supervisor per swap |
 
 The image server is **not** a unit: it exists only while the card is
@@ -59,10 +61,11 @@ prompt via sd.cpp's extension:
 ## Unit files
 
 The installed units live in `/etc/systemd/system/`:
-`k0b0l-swap.service`, `k0b0l-llama.service`. Their sources are kept in
-this repo under `ops/` — reinstall with:
+`k0b0l-swap.service`, `k0b0l-llama.service`, `k0b0l-webui.service`.
+Their sources are kept in this repo — `ops/` for the GPU services,
+`tools/webui.service` for the web UI — reinstall with:
 
 ```bash
-sudo cp ops/*.service /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo systemctl enable --now k0b0l-swap k0b0l-llama
+sudo cp ops/*.service tools/webui.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl enable --now k0b0l-swap k0b0l-llama k0b0l-webui
 ```
