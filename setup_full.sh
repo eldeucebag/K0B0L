@@ -141,6 +141,25 @@ if [ "$OS" = "Linux" ] && ! command -v nvidia-smi >/dev/null; then
   warn "re-download with the -cpu asset name, or install the NVIDIA driver."
 fi
 
+# Loader path: torch's cu12x wheels link libcupti.so.12, which ships in
+# the CUDA toolkit's lib64 — NOT in Ubuntu's ldconfig. Without this the
+# local diffusers fallback dies with:
+#   ImportError: libcupti.so.12: cannot open shared object file
+# Any toolkit with a .so.12 CUPTI works; newest wins.
+if [ "$OS" = "Linux" ]; then
+  CUPTI_DIR="$(ls -d /usr/local/cuda-12*/lib64 2>/dev/null | tail -1)"
+  if [ -n "$CUPTI_DIR" ] && [ -e "$CUPTI_DIR/libcupti.so.12" ]; then
+    if ! ldconfig -p 2>/dev/null | grep -q "libcupti.so.12"; then
+      printf '%s\n' "$CUPTI_DIR" \
+        | sudo tee /etc/ld.so.conf.d/cuda-toolkit-libs.conf >/dev/null
+      sudo ldconfig
+      ok "loader path: $CUPTI_DIR on ldconfig (libcupti.so.12 resolvable)"
+    else
+      ok "loader path: libcupti.so.12 already resolvable"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 3. sd.cpp (stable-diffusion.cpp) — the image API server
 # ---------------------------------------------------------------------------
