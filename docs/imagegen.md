@@ -6,9 +6,9 @@ card** — no cloud, no API, nothing leaves the machine.
 
 | name | what it is | speed (768²) | prompting |
 | --- | --- | --- | --- |
-| `pony` | Pony Diffusion V6 XL (SDXL) | ~1 minute | comma-separated tags work best |
+| `pony` | Pony Diffusion V6 XL (SDXL) | ~1 minute | comma-separated tags work best; negatives work |
 | `qwen` | Qwen-Image-2.1-UC + Heretic text encoder | ~4 minutes | natural language, best adherence |
-| `chroma` | Chroma 8.9B (uncensored Flux-class) | ~4 minutes | natural language |
+| `chroma` | Chroma 8.9B (uncensored Flux-class) | ~4 minutes | natural language; **short negative prompts misbehave — a Flux-Schnell finetune treats them as soft positive content. Describe what you want instead of what to avoid** (the dialog warns; the server arms the trained-for T5 padding mask to make negatives behave as well as the model allows) |
 
 Weights live in `/mnt/k0b0l-models` (26 GB); the runner is
 `tools/imagegen.py`:

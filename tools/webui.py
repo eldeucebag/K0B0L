@@ -536,6 +536,9 @@ dialog button.primary:hover { color: var(--accent-ink); }
   </label>
   <label class="opt-label">negative prompt <span class="opt-faint">(optional)</span>
     <input id="img-negative" placeholder="what to avoid">
+    <div id="img-negative-note" class="opt-faint" style="display:none;
+      font-size:11px; margin-top:2px;">chroma treats short negatives as
+      soft positive content — prefer describing what you DO want</div>
   </label>
   <div class="img-grid">
     <label class="opt-label">size
@@ -1498,6 +1501,13 @@ function applyModelPreset(model) {
   // technical knobs -- never the prompt, negative, or seed (seed -1
   // stays random). An operator who already chose something keeps it:
   // presets only land when the field is at its default/empty state.
+  const note = document.getElementById("img-negative-note");
+  if (note) {
+    // chroma's negative-prompt semantics are unreliable (a Flux-Schnell
+    // finetune: short negatives read as soft positive content) -- say so
+    // in the field instead of letting it look broken.
+    note.style.display = model === "chroma" ? "block" : "none";
+  }
   const p = MODEL_PRESETS[model] || null;
   if (!p) return;
   const sizeSel = document.getElementById("img-size");

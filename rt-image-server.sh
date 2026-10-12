@@ -37,13 +37,18 @@ case "$MODEL" in
     # walks the same stage in ~100 s on CPU. Verified end-to-end: 1-step
     # 256² CLI generation, rc=0, image saved.
     # No --offload-to-cpu either: resident DiT + CPU encoder/VAE fits.
+    # chroma_use_t5_mask=true: Chroma was TRAINED with its T5 padding
+    # tokens attention-masked (lodestones' TL;DR: masking the padding
+    # enhances fidelity and stability). Without it, the negative-prompt
+    # encoding attends to raw padding, and short negatives act as soft
+    # POSITIVE content -- the "negative prompt includes everything" bug.
     exec "$BIN" \
       --diffusion-model "$DIR/chroma-v44-unlocked-Q4_0.gguf" \
       --t5xxl "$DIR/t5-v1_1-xxl-encoder-Q4_K_M.gguf" \
       --vae "$DIR/flux_vae.safetensors" \
       -l 0.0.0.0 --listen-port 7860 \
       --backend clip=cpu,vae=cpu --max-vram 6 \
-      --model-args chroma_use_dit_mask=false
+      --model-args chroma_use_dit_mask=false,chroma_use_t5_mask=true
     ;;
   *)
     echo "unknown model: $MODEL (pony|qwen|chroma)" >&2
