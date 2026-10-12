@@ -2329,6 +2329,52 @@ class TurnTree:
             nodes.append(entry)
         return {"nodes": nodes, "active": self.active}
 
+    def to_json(self) -> dict:
+        """The serializable tree: nodes (with their response messages),
+        the id counter, and the active leaf. Round-trips via from_json."""
+        return {
+            "nodes": [{"id": nid, "parent": node["parent"],
+                       "user": node["user"],
+                       "assistant": node["assistant"],
+                       "kind": node["kind"]}
+                      for nid, node in
+                      ((n, self.nodes[n]) for n in self.order)
+                      if node["user"]],   # empty nodes never persisted
+            "next": self._next,
+            "active": self.active,
+        }
+
+    def from_json(self, data: dict) -> bool:
+        """Rebuild from a to_json dict. False when the payload is not a
+        usable tree (caller falls back to adopting the flat messages)."""
+        try:
+            nodes = data["nodes"]
+            self.nodes = {}
+            self.order = []
+            for entry in nodes:
+                nid = int(entry["id"])
+                self.nodes[nid] = {
+                    "id": nid,
+                    "parent": entry["parent"],
+                    "user": str(entry.get("user", "")),
+                    "assistant": list(entry.get("assistant") or []),
+                    "kind": str(entry.get("kind", "chat")),
+                }
+                self.order.append(nid)
+            self._next = int(data.get("next", 0))
+            self.active = data.get("active")
+            if self.active is not None:
+                self.active = int(self.active)
+        except (KeyError, TypeError, ValueError):
+            return False
+        # validity: every node's parent must exist (or be the root)
+        if any(n["parent"] is not None and n["parent"] not in self.nodes
+               for n in self.nodes.values()):
+            return False
+        if self.active is not None and self.active not in self.nodes:
+            return False
+        return bool(self.nodes)
+
     def adopt(self, messages: list[dict]) -> None:
         """Bootstrap the tree from a flat history (server restart or
         session load): each user turn becomes a node on one chain.
@@ -2368,8 +2414,10 @@ class SessionManager:
     #: conversation, whichever tab or TUI run had it.
     AUTOSAVE = "__webui_last__"
 
-    def __init__(self, ui: "WebChat") -> None:
+    def __init__(self, ui: "WebChat",
+                 tree: "TurnTree | None" = None) -> None:
         self.ui = ui
+        self.tree = tree
         from rt_harness.infotools import _session_dir
 
         self.dir = _session_dir()
@@ -2378,7 +2426,12 @@ class SessionManager:
         import json
 
         path = self.dir / f"{name}.json"
-        payload = {"messages": self.ui.session.messages}
+        payload: dict[str, Any] = {"messages": self.ui.session.messages}
+        # The tree rides along: branches survive restarts and named
+        # loads. The active chain stays in `messages` (TUI reads that),
+        # so the file is both a flat session and a graph.
+        if self.tree is not None and self.tree.nodes:
+            payload["tree"] = self.tree.to_json()
         path.write_text(json.dumps(payload, ensure_ascii=False),
                         encoding="utf-8")
         return f"session saved to {path.name}"
@@ -2399,6 +2452,7 @@ class SessionManager:
             1 for m in messages if m.get("role") == "user")
         self.ui.session.tool_calls_made = sum(
             len((m.get("tool_calls") or [])) for m in messages)
+        self.loaded_tree = data.get("tree")
         return True, f"session {name!r} loaded ({len(messages)} messages)"
 
     def delete(self, name: str) -> tuple[bool, str]:
@@ -2525,18 +2579,31 @@ def main() -> int:
                  show_thinking=config.show_thinking)
     ui.set_gen_registry(GEN)
     ui.set_relay_publisher(send_pub)
-    sessions = SessionManager(ui)
     #: The conversation graph: the context window is the root, every
-    #: turn a node, branches orthogonal paths off any node.
+    #: turn a node, branches orthogonal paths off any node. Built
+    #: BEFORE the session manager so saves carry it.
     TREE = TurnTree()
+    sessions = SessionManager(ui, tree=TREE)
     #: The engine session adopts the autosave at STARTUP, so a server
-    #: restart continues the conversation too.
+    #: restart continues the conversation too -- and the tree restores
+    #: from the same file when one was saved (branch structure and the
+    #: active leaf survive restarts); a treeless file falls back to
+    #: adopting the flat messages as one chain.
     try:
         sessions.load(SessionManager.AUTOSAVE)
     except Exception:  # noqa: BLE001 - a bad file is a fresh chat
         pass
-    # ...and the tree adopts the loaded history: one chain of nodes.
-    TREE.adopt(ui.session.messages)
+    restored_tree = getattr(sessions, "loaded_tree", None)
+    if isinstance(restored_tree, dict) and TREE.from_json(restored_tree):
+        # The tree restored. Re-project the engine messages from the
+        # ACTIVE chain so session state and tree agree exactly, even
+        # if the file's flat `messages` drifted from the last save.
+        sysmsgs = [m for m in ui.session.messages
+                   if m.get("role") == "system"]
+        ui.session.messages[:] = sysmsgs + \
+            TREE.messages_for(TREE.active)
+    else:
+        TREE.adopt(ui.session.messages)
     #: One turn at a time: two tabs typing at once serialize here.
     TURN_LOCK = asyncio.Lock()
 
@@ -2647,10 +2714,16 @@ def main() -> int:
                         # Loading REPLACES the server-side conversation:
                         # repaint goes to EVERY tab through repaint_chain
                         # (which also replaces HISTORY, so a later connect
-                        # replays the loaded session only), and the tree
-                        # re-adopts the flat history as one chain.
+                        # replays the loaded session only). The tree
+                        # restores from the file's graph when it has one;
+                        # a flat file adopts as a single chain.
                         TREE.__init__()
-                        TREE.adopt(ui.session.messages)
+                        loaded_tree = getattr(sessions, "loaded_tree", None)
+                        if isinstance(loaded_tree, dict) \
+                                and TREE.from_json(loaded_tree):
+                            pass
+                        else:
+                            TREE.adopt(ui.session.messages)
                         await repaint_chain(broadcast_tree=True)
                         await send_pub({"kind": "notice", "text": note})
                         sessions.save(SessionManager.AUTOSAVE)
