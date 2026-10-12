@@ -1737,7 +1737,22 @@ class WebChat(ChatUI):
         self._frame({"kind": "status", "text": " · ".join(parts)})
 
     def show_image(self, relative_path: str) -> None:
-        self._frame({"kind": "image", "path": relative_path})
+        # Attach the run's request to the frame (copy = the prompt, not
+        # the filename) and persist it as a sidecar next to the image:
+        # the disk-replay reads the sidecar long after this socket and
+        # its run record are gone.
+        frame: dict[str, Any] = {"kind": "image", "path": relative_path}
+        reg = self._gen_registry
+        run = reg.get("active") if reg else None
+        if run is not None and run.get("request"):
+            frame["request"] = run["request"]
+            try:
+                root = self.session.workspace.root
+                sidecar = (root / relative_path).with_suffix(".prompt")
+                sidecar.write_text(json.dumps(run["request"], indent=2))
+            except OSError:
+                pass
+        self._frame(frame)
 
     def gen_progress(self, phase: str, step: int, total: int) -> None:
         """A generation-progress frame: the page renders a live bar."""
@@ -1810,8 +1825,17 @@ class WebChat(ChatUI):
             images = []
         for path in images[:20]:
             self._frame({"kind": "assistant"})
-            self._frame({"kind": "image",
-                         "path": f"images/{path.name}"})
+            frame: dict[str, Any] = {"kind": "image",
+                                     "path": f"images/{path.name}"}
+            # The sidecar written at generation time carries the prompt
+            # and knobs: replayed images keep their copy/retry buttons,
+            # and "copy" means the PROMPT -- never the filename.
+            sidecar = path.with_suffix(".prompt")
+            try:
+                frame["request"] = json.loads(sidecar.read_text())
+            except (OSError, ValueError):
+                pass
+            self._frame(frame)
             self._frame({"kind": "turn_end"})
 
     def ui_session_root(self) -> Path:
@@ -2311,6 +2335,18 @@ def main() -> int:
                                 saved = sorted(out_dir.glob(
                                     f"{model}-{stamp}*.png"))
                                 for path in saved:
+                                    # Sidecar: the prompt and every knob,
+                                    # durable next to the image. The
+                                    # disk-replay reads it so copy means
+                                    # the prompt and retry works -- long
+                                    # after this run's frames are gone.
+                                    try:
+                                        path.with_suffix(
+                                            ".prompt").write_text(
+                                            json.dumps(req_echo,
+                                                       indent=2))
+                                    except OSError:
+                                        pass
                                     after.append({
                                         "kind": "image",
                                         "path": f"images/{path.name}",
@@ -2421,6 +2457,19 @@ def main() -> int:
                         if result is not None and result.ok:
                             after.append({
                                 "kind": "raw", "text": result.text})
+                            # Sidecar for the disk-replay: the prompt and
+                            # knobs, durable next to the newest image this
+                            # run wrote (the raw text names it, but the
+                            # file is easier to find by mtime).
+                            try:
+                                newest = max(
+                                    (chat_config.root / "images")
+                                    .glob("*.png"),
+                                    key=lambda p: p.stat().st_mtime)
+                                newest.with_suffix(".prompt").write_text(
+                                    json.dumps(req_echo_plain, indent=2))
+                            except (OSError, ValueError):
+                                pass
                         elif result is not None:
                             after.append({
                                 "kind": "error", "text": result.text})
