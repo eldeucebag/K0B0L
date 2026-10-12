@@ -615,8 +615,7 @@ const THEMES = {
 };
 const DEFAULT_PALETTE = {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330"};
 const ROOT_VARS = ["--bg","--surface","--band","--ink","--muted","--faint","--accent","--accent-ink","--code-bg","--think-bg","--warn","--err","--border"];
-const ws = new WebSocket(
-  (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+let ws = null;  // assigned by connectWS(); every handler re-attaches there
 const transcript = document.getElementById("transcript");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
@@ -913,7 +912,11 @@ function el(tag, cls, text) {
   return e;
 }
 
-ws.onmessage = (ev) => {
+let wsHandlersBound = null;
+function wireSocket() {
+  // The frame handler lives ONCE: reconnects swap the socket object,
+  // and this re-attaches to whatever connectWS() put in `ws`.
+  ws.onmessage = (ev) => {
   const m = JSON.parse(ev.data);
   switch (m.kind) {
     case "meta":
@@ -1098,16 +1101,81 @@ ws.onmessage = (ev) => {
     case "raw":
       // unhandled line kinds (slash-command output) render as muted prose
       el("div", "prose", m.text); scroll(); break;
+    case "pong":
+      // the heartbeat's echo: proof the socket is alive from the
+      // server's side too (see the freezer defense below)
+      lastPong = Date.now();
+      break;
   }
 };
-ws.onopen = () => { meta.textContent = "connected"; input.focus(); };
-ws.onclose = () => {
-  meta.textContent = "disconnected — the input still works; messages " +
-    "queue in the page until the server returns";
-  setBusy(false);
-  send.disabled = false;  // a dead socket must not wedge the input
-  input.focus();
-};
+}
+// -- socket lifecycle: survive Android's background freezer ---------------
+// Android Chrome suspends the tab when it backgrounds: timers freeze and
+// the socket dies silently. Without this block, coming back meant a
+// stalled page (no reconnect, frames lost) and a manual refresh -- which
+// used to wipe the transcript (now the server carries history across).
+// Three defenses:
+//   1. heartbeat: a ping every 20s; no pong in 45s = treat as dead
+//   2. reconnect: on close/stall, exponential backoff up to 30s, forever
+//   3. visibilitychange: on foreground, force an immediate resync --
+//      the socket may be "open" but frozen; reconnect unconditionally
+let wsConnected = false;
+let lastPong = Date.now();
+let reconnectDelay = 1000;
+let reconnectTimer = null;
+
+function connectWS() {
+  ws = new WebSocket(
+    (location.protocol === "https:" ? "wss://" : "ws://")
+    + location.host + "/ws");
+  wireSocket();
+  ws.onopen = () => {
+    wsConnected = true;
+    lastPong = Date.now();
+    reconnectDelay = 1000;
+    meta.textContent = "connected";
+    input.focus();
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    meta.textContent = "reconnecting…";
+    setBusy(false);
+    send.disabled = false;  // a dead socket must not wedge the input
+    scheduleReconnect();
+  };
+  ws.onerror = () => { /* onclose follows */ };
+}
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectWS();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+}
+
+// Heartbeat: the server echoes pings; silence means a frozen socket
+// even when the browser believes it is open (Android's freezer).
+setInterval(() => {
+  if (!wsConnected) return;
+  if (Date.now() - lastPong > 45000) {
+    try { ws.close(); } catch (e) { /* already dead */ }
+    return;
+  }
+  try { ws.send(JSON.stringify({"ping": 1})); } catch (e) { /* dying */ }
+}, 20000);
+
+// Foregrounding the tab: force a reconnect NOW -- the frozen socket
+// is indistinguishable from an open one until it times out.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    if (!wsConnected || Date.now() - lastPong > 20000) {
+      try { ws.close(); } catch (e) { /* already dead */ }
+    }
+    input.focus();
+  }
+});
+connectWS();
 
 document.getElementById("form").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2146,6 +2214,12 @@ def main() -> int:
         try:
             while True:
                 message = await websocket.receive_json()
+                # Heartbeat: the page pings to prove the socket is
+                # alive (Android's freezer kills tabs silently); this
+                # echo is the pong its watchdog keys on.
+                if isinstance(message, dict) and message.get("ping"):
+                    await websocket.send_json({"kind": "pong"})
+                    continue
                 # -- session control messages first: they carry no "text",
                 # so the empty-text guard below must never swallow them
                 # (it did, and every panel button silently died).

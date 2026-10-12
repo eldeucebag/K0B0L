@@ -242,9 +242,25 @@ class ChatUI(ChatHooks):
         return out
 
     def rebuild(self, **changes: Any) -> None:
-        """Replace the chat settings and start a fresh session."""
+        """Replace the chat settings and start a fresh session.
+
+        The CONVERSATION carries across: switching models or the root
+        mid-chat is a settings change, not a /clear -- dropping the
+        history here once silently cost a real session (the webui
+        autosaved the rebuilt empty session over the live one). Only
+        reset() drops history; that stays true.
+        """
+        carried = ([dict(m) for m in self.session.messages]
+                   if getattr(self, "session", None) else [])
         self.config.chat = replace(self.config.chat, **changes)
         self.session = self._build(self.config.chat)
+        if carried:
+            # keep everything after the (now-stale) system message;
+            # the fresh session's system message reflects the new model.
+            history = [m for m in carried if m.get("role") != "system"]
+            self.session.messages.extend(history)
+            self.session.turns = sum(
+                1 for m in history if m.get("role") == "assistant")
 
     # -- rendering hooks the subclasses implement -------------------------
     def line(self, text: str = "") -> None:  # pragma: no cover - abstract
