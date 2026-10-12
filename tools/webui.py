@@ -2046,6 +2046,17 @@ def main() -> int:
             ui.send_history(ui.session.messages)
             ui._frame({"kind": "restore_end"})
             await asyncio.sleep(0.2)
+        else:
+            # Images live on disk, independent of the chat autosave --
+            # a page that refreshes after image runs (or after the
+            # autosave was deleted / never written) still repaints
+            # them. Without this, an absent autosave made EVERY image
+            # invisible on connect: send_history (which carries the
+            # image replay) only ran when a chat session restored.
+            ui._frame({"kind": "restore_begin"})
+            ui.send_history([])
+            ui._frame({"kind": "restore_end"})
+            await asyncio.sleep(0.2)
         # Join an image run in flight (or one that finished moments ago):
         # the page refreshed mid-generation must rejoin the animation,
         # not sit blank -- and a refresh right after completion still
