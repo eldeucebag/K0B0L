@@ -250,9 +250,10 @@ else
   hf abenzerps/Qwen-Image-2.1-Uncensored-GGUF qwen-image-2.1-UC-Q4_0.gguf qwen-image-2.1-UC-Q4_0.gguf 4.15G
   hf pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF qwen3vl_8b_heretic-Q4_K_M.gguf qwen3vl_8b_heretic-Q4_K_M.gguf 4.68G
   hf Qwen/Qwen-Image-2.1 vae/diffusion_pytorch_model.safetensors qwen_image_vae_2.1.safetensors 1.35G
-  # chroma: Flux-class DiT GGUF + T5 fp8 encoder + flux VAE
+  # chroma: Flux-class DiT GGUF + GGUF T5 encoder (fp8 safetensors T5
+  # segfaults this sd.cpp build — see rt-image-server.sh) + flux VAE
   hf silveroxides/Chroma-GGUF chroma-unlocked-v44/chroma-unlocked-v44-Q4_0.gguf chroma-v44-unlocked-Q4_0.gguf 5.43G
-  hf fmoraes2k/t5xxl_fp8_e4m3fn.safetensors t5xxl_fp8_e4m3fn.safetensors t5_xxl_fp8_e4m3fn.safetensors 4.9G
+  hf city96/t5-v1_1-xxl-encoder-gguf t5-v1_1-xxl-encoder-Q4_K_M.gguf t5-v1_1-xxl-encoder-Q4_K_M.gguf 2.9G
   hf foxmail/flux_vae ae.safetensors flux_vae.safetensors 335M
 fi
 

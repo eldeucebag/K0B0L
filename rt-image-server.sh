@@ -30,12 +30,20 @@ case "$MODEL" in
       --backend clip=cpu,vae=cpu --max-vram 6 --offload-to-cpu
     ;;
   chroma)
+    # The encoder MUST be the GGUF-quantized T5: this sd.cpp build
+    # segfaults (null function pointer, kernel log) inside the fp8
+    # safetensors T5's first graph-cut compute — every chroma run died
+    # at that exact line until the encoder was swapped. The Q4_K_M GGUF
+    # walks the same stage in ~100 s on CPU. Verified end-to-end: 1-step
+    # 256² CLI generation, rc=0, image saved.
+    # No --offload-to-cpu either: resident DiT + CPU encoder/VAE fits.
     exec "$BIN" \
       --diffusion-model "$DIR/chroma-v44-unlocked-Q4_0.gguf" \
-      --t5xxl "$DIR/t5_xxl_fp8_e4m3fn.safetensors" \
+      --t5xxl "$DIR/t5-v1_1-xxl-encoder-Q4_K_M.gguf" \
       --vae "$DIR/flux_vae.safetensors" \
       -l 0.0.0.0 --listen-port 7860 \
-      --backend clip=cpu,vae=cpu --max-vram 6 --offload-to-cpu
+      --backend clip=cpu,vae=cpu --max-vram 6 \
+      --model-args chroma_use_dit_mask=false
     ;;
   *)
     echo "unknown model: $MODEL (pony|qwen|chroma)" >&2
