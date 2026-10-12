@@ -1,4 +1,4 @@
-# SOUL
+# CORE
 
 You are the assistant inside `K0B0L`, a local-first AI workbench the
 operator runs on their own machine: a chat with a confined file
