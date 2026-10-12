@@ -1758,7 +1758,16 @@ class WebChat(ChatUI):
 
     async def _send_guarded(self, frame: str) -> None:
         """A dead tab (refresh mid-turn) must not spray unretrieved-task
-        exceptions into the log -- the send is best-effort, always."""
+        exceptions into the log -- the send is best-effort, always.
+        The server-wide session has no socket of its own: its frames go
+        through the serve-scope publisher (`_frame_out`) instead, which
+        fans out to every live tab."""
+        out = getattr(self, "_frame_out", None)
+        if out is not None:
+            await out(json.loads(frame))
+            return
+        if self.socket is None:
+            return
         try:
             await self.socket.send(
                 {"type": "websocket.send", "text": frame})
@@ -2093,6 +2102,53 @@ def main() -> int:
     #: them, so a second tab (or a refreshed one) sees the same run.
     SOCKETS: set = set()
 
+    #: Server-lifetime frame log (bounded): the replay every connect
+    #: fast-forwards through. This IS the transcript of record.
+    HISTORY: list[dict[str, Any]] = []
+    HISTORY_CAP = 2000
+
+    async def send_pub(frame: dict[str, Any]) -> None:
+        """Publish to every live socket AND into the history log: the
+        log is the server-side transcript; every connect replays it.
+        Dead sockets are dropped, never fatal."""
+        if frame.get("kind") != "pong":
+            HISTORY.append(dict(frame))
+            if len(HISTORY) > HISTORY_CAP:
+                del HISTORY[0:len(HISTORY) - HISTORY_CAP]
+        for sock in list(SOCKETS):
+            try:
+                await sock.send_json(frame)
+            except Exception:  # noqa: BLE001
+                SOCKETS.discard(sock)
+
+    # -- ONE server-side session, every connection a view onto it -----------
+    # Session management is entirely server-side: a single WebChat/engine
+    # session lives for the server's lifetime; every tab connects, gets
+    # the CURRENT transcript replayed, and receives every live frame.
+    # No per-socket session building, no per-connect autosave restore to
+    # get right -- a connect cannot fail to show the conversation,
+    # because the conversation IS the server's state.
+    ui = WebChat(None, client, config,
+                 tool_output=chat_config.tool_output,
+                 show_thinking=config.show_thinking)
+    ui.set_gen_registry(GEN)
+    ui.set_relay_publisher(send_pub)
+    sessions = SessionManager(ui)
+    #: The engine session adopts the autosave at STARTUP, so a server
+    #: restart continues the conversation too.
+    try:
+        sessions.load(SessionManager.AUTOSAVE)
+    except Exception:  # noqa: BLE001 - a bad file is a fresh chat
+        pass
+    #: One turn at a time: two tabs typing at once serialize here.
+    TURN_LOCK = asyncio.Lock()
+
+    # WebChat._frame normally sends to its own socket; the shared
+    # session has none. Route its renders to the publisher instead:
+    # every render reaches every tab and lands in the history log.
+    ui._frame_out = lambda payload: asyncio.ensure_future(
+        send_pub(payload))
+
     def log_frame(run: dict[str, Any] | None, frame: dict[str, Any]) -> None:
         """Record into the active run's replay log. SYNCHRONOUS and
         GIL-atomic -- safe to call from within ``finally`` blocks where a
@@ -2100,15 +2156,6 @@ def main() -> int:
         their retirement."""
         if run is not None:
             run["frames"].append(dict(frame))
-
-    async def send_pub(frame: dict[str, Any]) -> None:
-        """Send one frame to every live socket. Network-only: the caller
-        owns logging. Dead sockets are dropped, never fatal."""
-        for sock in list(SOCKETS):
-            try:
-                await sock.send_json(frame)
-            except Exception:  # noqa: BLE001
-                SOCKETS.discard(sock)
 
     async def bcast_pub(frame: dict[str, Any]) -> None:
         """The ONE publisher every generation path uses (dialog, typed
@@ -2148,65 +2195,31 @@ def main() -> int:
     async def ws_endpoint(websocket: WebSocket) -> None:
         nonlocal saved_theme
         await websocket.accept()
-        # WebChat IS a ChatUI: the session it builds binds itself as the
-        # hooks, every render sinks to the socket, and dispatch's whole
-        # slash-command surface works unchanged.
-        ui = WebChat(websocket, client, config,
-                     tool_output=chat_config.tool_output,
-                     show_thinking=config.show_thinking)
-        # Model-initiated generate_image tool-calls open their own run
-        # records through this registry (see WebChat.tool_call).
-        ui.set_gen_registry(GEN)
-        # And relay their frames to peer tabs live while a run is open.
-        ui.set_relay_publisher(send_pub)
-        sessions = SessionManager(ui)
-        # Restore the last session: the web's contract is that a refresh
-        # or a reopened tab continues where the last conversation left
-        # off. Fails soft -- an empty or unreadable autosave just means
-        # a fresh chat.
-        restored = False
-        try:
-            ok, _ = sessions.load(SessionManager.AUTOSAVE)
-            restored = ok
-        except Exception:  # noqa: BLE001 - a bad file is a fresh chat
-            restored = False
+        # The shared WebChat is built BEFORE uvicorn runs its loop, so
+        # the loop it captured at __init__ is dead. Every engine render
+        # schedules through call_soon_threadsafe -- rebind to the LIVE
+        # loop on the first connection (and idempotently after).
+        ui._loop = asyncio.get_running_loop()
+        # Session management is entirely SERVER-SIDE: one engine session
+        # for the server's lifetime, every connection a view onto it.
+        # Connect = replay the server's frame history, then subscribe to
+        # live frames. No per-connect session build, no autosave-load
+        # heuristics that can leave the page blank -- the conversation
+        # is the server's state, not a guess rebuilt from disk.
         await websocket.send_json({
             "kind": "meta", "model": ui.session.config.model,
             "protocol": ui.session.protocol,
             "num_ctx": ui.session.config.num_ctx,
             "theme": saved_theme or "k0b0l-dark",
-            "restored": restored,
+            "restored": len(HISTORY) > 0,
         })
-        if restored:
-            # Through ui._frame with the history frames, then a flush:
-            # direct send_json raced the queued frames and closed the
-            # bracket before the replay painted.
-            ui._frame({"kind": "restore_begin"})
-            ui.send_history(ui.session.messages)
-            ui._frame({"kind": "restore_end"})
-            await asyncio.sleep(0.2)
-        else:
-            # Images live on disk, independent of the chat autosave --
-            # a page that refreshes after image runs (or after the
-            # autosave was deleted / never written) still repaints
-            # them. Without this, an absent autosave made EVERY image
-            # invisible on connect: send_history (which carries the
-            # image replay) only ran when a chat session restored.
-            ui._frame({"kind": "restore_begin"})
-            ui.send_history([])
-            ui._frame({"kind": "restore_end"})
-            await asyncio.sleep(0.2)
-        # Join an image run in flight (or one that finished moments ago):
-        # the page refreshed mid-generation must rejoin the animation,
-        # not sit blank -- and a refresh right after completion still
-        # sees the image with its buttons.
-        join = GEN["active"]
-        if join is None and GEN["last"] is not None \
-                and time.time() - GEN["last"]["ended"] < 300:
-            join = GEN["last"]
-        if join is not None:
+        # The transcript replay: everything the server has rendered this
+        # run, exactly as a live tab saw it -- chat turns, tool panels,
+        # image runs (their frames live in HISTORY too, and the images
+        # themselves on disk). Bracketed so the page paints it once.
+        if HISTORY:
             await websocket.send_json({"kind": "restore_begin"})
-            for frame in join["frames"]:
+            for frame in HISTORY:
                 await websocket.send_json(frame)
             await websocket.send_json({"kind": "restore_end"})
         loop = asyncio.get_event_loop()
@@ -2234,16 +2247,18 @@ def main() -> int:
                         continue
                     if verb == "load":
                         ok, note = sessions.load(name)
-                        # All through ui._frame, the same FIFO the history
-                        # frames use: a direct send_json raced the queued
-                        # frames and closed the bracket before the replay.
-                        ui._frame({"kind": "restore_begin"})
+                        # Loading REPLACES the server-side conversation:
+                        # clear + repaint goes to EVERY tab, the frame
+                        # log IS the new transcript, and the autosave
+                        # follows so a restart adopts it too.
+                        HISTORY.clear()
+                        await send_pub({"kind": "clear"})
+                        await send_pub({"kind": "restore_begin"})
                         if ok:
                             ui.send_history(ui.session.messages)
-                        ui._frame({"kind": "notice", "text": note})
-                        ui._frame({"kind": "restore_end"})
+                        await send_pub({"kind": "notice", "text": note})
+                        await send_pub({"kind": "restore_end"})
                         sessions.save(SessionManager.AUTOSAVE)
-                        await asyncio.sleep(0.2)  # let the queue flush
                         continue
                     if verb == "save":
                         note = sessions.save(name or "web-session")
@@ -2260,8 +2275,10 @@ def main() -> int:
                         # re-autosaves the zombie conversation.
                         if ok and name == SessionManager.AUTOSAVE:
                             ui.session.reset()
-                            await websocket.send_json({"kind": "clear"})
+                            HISTORY.clear()
+                            await send_pub({"kind": "clear"})
                         continue
+
                 img = message.get("image")
                 if isinstance(img, dict):
                     # The image dialog's structured request. Two paths:
@@ -2656,24 +2673,26 @@ def main() -> int:
                     # row the whole turn (bar, result, image) renders in an
                     # unlabeled block -- or, before the page grew
                     # ensureTurn, crashed the handler on a null turn.
-                    await websocket.send_json({"kind": "you", "text": text})
+                    await send_pub({"kind": "you", "text": text})
                     if text in ("/exit", "/quit", "/q"):
-                        await websocket.send_json(
+                        await send_pub(
                             {"kind": "notice", "text": "the web session "
                              "stays; just close the tab"})
-                        await websocket.send_json({"kind": "turn_end"})
+                        await send_pub({"kind": "turn_end"})
                         continue
-                    handled = await loop.run_in_executor(
-                        None, ui.dispatch, text)
-                    if not handled:
-                        await websocket.send_json(
-                            {"kind": "raw", "text": text})
-                    if text.split()[0].lower() in ("/clear",):
-                        # The session was reset server-side; the page's
-                        # transcript must follow or the next turn paints
-                        # below a conversation the model no longer holds.
-                        await websocket.send_json({"kind": "clear"})
-                    await websocket.send_json({"kind": "turn_end"})
+                    async with TURN_LOCK:
+                        handled = await loop.run_in_executor(
+                            None, ui.dispatch, text)
+                        if not handled:
+                            await send_pub(
+                                {"kind": "raw", "text": text})
+                        if text.split()[0].lower() in ("/clear",):
+                            # The shared session was reset server-side;
+                            # EVERY tab's transcript must follow, and the
+                            # frame log IS the new (empty) transcript.
+                            HISTORY.clear()
+                            await send_pub({"kind": "clear"})
+                        await send_pub({"kind": "turn_end"})
                     # Slash commands can change the live session (/clear,
                     # /session load, /model): keep the autosave slot in
                     # sync, or a reconnect restores a stale conversation.
@@ -2682,7 +2701,7 @@ def main() -> int:
                     except Exception:  # noqa: BLE001 - persistence is best-effort
                         pass
                     continue
-                await websocket.send_json({"kind": "you", "text": text})
+                await send_pub({"kind": "you", "text": text})
                 # The GPU is one card shared with image generation. After an
                 # image turn the model is merely unloaded (slow reload); after
                 # a swap the whole llm service is *down* and the turn would
@@ -2695,29 +2714,31 @@ def main() -> int:
                         swap_state = json.loads(r.read())
                 except Exception:  # noqa: BLE001 - no supervisor, no swap
                     swap_state = None
-                if swap_state and not swap_state.get("llm", True):
-                    await websocket.send_json({"kind": "busy", "on": True})
-                    await websocket.send_json({
-                        "kind": "notice",
-                        "text": "the llm service is down — the GPU was "
-                                "swapped to image generation; swapping "
-                                "back (this can take a minute)..."})
-                    try:
-                        request = urllib.request.Request(
-                            swap_api + "/swap/llm", data=b"{}",
-                            headers={"Content-Type": "application/json"})
-                        with urllib.request.urlopen(
-                                request, timeout=140) as r:
-                            json.loads(r.read())
-                        await websocket.send_json({
+                async with TURN_LOCK:
+                    if swap_state and not swap_state.get("llm", True):
+                        await send_pub({"kind": "busy", "on": True})
+                        await send_pub({
                             "kind": "notice",
-                            "text": "the llm service is back"})
-                    except Exception as exc:  # noqa: BLE001
-                        await websocket.send_json({
-                            "kind": "notice",
-                            "text": f"could not restore the llm service: "
-                                    f"{exc}"})
-                    await websocket.send_json({"kind": "busy", "on": False})
+                            "text": "the llm service is down — the GPU was "
+                                    "swapped to image generation; swapping "
+                                    "back (this can take a minute)..."})
+                        try:
+                            request = urllib.request.Request(
+                                swap_api + "/swap/llm", data=b"{}",
+                                headers={
+                                    "Content-Type": "application/json"})
+                            with urllib.request.urlopen(
+                                    request, timeout=140) as r:
+                                json.loads(r.read())
+                            await send_pub({
+                                "kind": "notice",
+                                "text": "the llm service is back"})
+                        except Exception as exc:  # noqa: BLE001
+                            await send_pub({
+                                "kind": "notice",
+                                "text": f"could not restore the llm "
+                                        f"service: {exc}"})
+                        await send_pub({"kind": "busy", "on": False})
                 # A swapped-away model reloads its weights on this turn:
                 # 10-40 s for the 8B, ~130 s for the 14B, and until the
                 # first token there is no frame at all. Say so before the
@@ -2730,11 +2751,11 @@ def main() -> int:
                     if (str(row.get("id")) == ui.session.config.model
                             and str(row.get("state", "")).lower()
                             == "unloaded"):
-                        await websocket.send_json({
+                        await send_pub({
                             "kind": "notice",
                             "text": f"loading {ui.session.config.model} "
-                                    "(weights were swapped off the card; "
-                                    "this can take a minute)"})
+                                    "(weights were swapped off the "
+                                    "card; this can take a minute)"})
                         break
                 await loop.run_in_executor(None, ui.ask, text)
                 # Autosave after every completed turn: "restore last
@@ -2748,10 +2769,9 @@ def main() -> int:
             pass
         finally:
             SOCKETS.discard(websocket)
-            try:
-                ui.session.memory and ui.session.memory.close()
-            except Exception:  # noqa: BLE001
-                pass
+            # The engine session is shared and outlives this socket:
+            # nothing to close here -- one tab closing must not tear
+            # down the conversation every other tab still sees.
 
     async def image(request):
         rel = request.path_params["path"]
