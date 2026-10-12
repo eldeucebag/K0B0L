@@ -306,6 +306,25 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   color: var(--ink); font: 12.5px/1.5 var(--mono);
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.branch-switcher {
+  display: flex; gap: 6px; align-items: center;
+  min-width: 0; overflow-x: auto; scrollbar-width: thin;
+}
+.branch-chip {
+  flex-shrink: 0; background: var(--band); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 12px;
+  font-size: 11px; padding: 2px 10px; cursor: pointer;
+  font-family: var(--mono); max-width: 160px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.branch-chip.on {
+  color: var(--accent); border-color: var(--accent);
+}
+.branch-chip:hover { color: var(--accent); border-color: var(--accent); }
+.branch-label { color: var(--faint); font-size: 11px;
+  font-family: var(--mono); flex-shrink: 0; }
+#tree-hint { color: var(--faint); font-size: 11.5px; padding: 2px 16px; }
+.turn-actions { margin-top: 6px; }
 .genbar-wrap {
   margin: 2px 0 6px; display: grid; gap: 4px;
 }
@@ -476,12 +495,14 @@ dialog button.primary:hover { color: var(--accent-ink); }
 <header>
   <span class="name">K<b>0</b>B<b>0</b>L</span>
   <span class="meta" id="meta">connecting…</span>
+  <span id="branch-switcher" class="branch-switcher"></span>
   <button id="image-btn" class="hbtn" title="generate an image">🎨</button>
   <button id="skills-btn" class="hbtn" title="skills & core">🧠</button>
   <button id="history-btn" class="hbtn" title="sessions">≡</button>
   <button id="options" class="hbtn" title="options">⚙</button>
 </header>
 <main id="transcript" aria-live="polite"></main>
+<div id="tree-hint" style="display:none"></div>
 <form id="form">
   <input id="input" autocomplete="off" placeholder="ask, or / for commands"
          aria-label="message">
@@ -926,6 +947,102 @@ function newTurn() {
   turn.className = "turn";
   transcript.appendChild(turn);
 }
+// -- the conversation graph (client side) -----------------------------------
+// Each turn maps to a server node id (arrives in the tree frames). The
+// branch button under a turn forks the context at that point; sibling
+// branches collapse because only one chain is active at a time.
+let TREE_STATE = {nodes: [], active: null};
+function turnNodeOf(turnEl) {
+  return turnEl ? parseInt(turnEl.getAttribute("data-node") || "0", 10) : 0;
+}
+function addBranchButton(turnEl) {
+  if (turnEl.querySelector(".branch-btn")) return;
+  const btn = document.createElement("button");
+  btn.className = "act branch-btn";
+  btn.textContent = "🌿 branch";
+  btn.title = "fork the context here: the new path keeps everything " +
+              "up to this point, and later turns stay on the old path";
+  btn.addEventListener("click", () => {
+    const nid = turnNodeOf(turnEl);
+    if (!nid) return;
+    ws.send(JSON.stringify({ tree_branch: { from: nid } }));
+  });
+  // the button lives in the turn's action bar if one exists, else its own row
+  const bar = turnEl.querySelector(".artifact-actions");
+  if (bar) { bar.appendChild(btn); return; }
+  const row = document.createElement("div");
+  row.className = "artifact-actions turn-actions";
+  row.appendChild(btn);
+  turnEl.appendChild(row);
+}
+function applyTreeState(m) {
+  TREE_STATE = {nodes: m.nodes || [], active: m.active};
+  // mark turns with their node ids: turns are appended in node order,
+  // and the tree's node list carries each node's user text -- match by
+  // sequence of turns on the active chain first, then siblings.
+  const turns = Array.from(document.querySelectorAll(".turn"));
+  // nodes in discovery order correspond to turns that were RENDERED;
+  // a repaint after a switch re-renders only the active chain, so map
+  // by the active chain first.
+  const active = (m.nodes || []).filter(n => n.active_chain);
+  turns.forEach((t, i) => {
+    const n = active[i];
+    if (n) t.setAttribute("data-node", String(n.id));
+    addBranchButton(t);
+  });
+  // sibling indicator: if any node has siblings (same parent, later
+  // id than the active one), show a switch hint
+  const hint = document.getElementById("tree-hint");
+  if (hint) {
+    const siblings = (m.nodes || []).filter(
+      n => n.parent !== null && (m.nodes || []).some(
+        o => o.parent === n.parent && o.id !== n.id));
+    hint.style.display = siblings.length ? "block" : "none";
+    hint.textContent = siblings.length
+      ? "this conversation has " + siblings.length +
+        " branch point(s); 🌿 on a turn forks it"
+      : "";
+  }
+}
+function renderBranchSwitcher() {
+  // sibling branches of the active node's ancestors become clickable
+  // chips: only one chain active at a time
+  const holder = document.getElementById("branch-switcher");
+  if (!holder) return;
+  holder.innerHTML = "";
+  if (!TREE_STATE.nodes.length) return;
+  const byId = {};
+  TREE_STATE.nodes.forEach(n => { byId[n.id] = n; });
+  // find every node that has a sibling (same parent, different node)
+  const groups = {};
+  TREE_STATE.nodes.forEach(n => {
+    const key = String(n.parent);
+    (groups[key] = groups[key] || []).push(n);
+  });
+  const chips = [];
+  Object.values(groups).forEach(g => {
+    if (g.length < 2) return;
+    g.sort((a, b) => a.id - b.id).forEach(n => {
+      const chip = document.createElement("button");
+      chip.className = "branch-chip" +
+        (n.active_chain ? " on" : "");
+      chip.textContent = "#" + n.id + " " +
+        (n.user ? n.user.slice(0, 24) : "(branch)");
+      chip.title = "switch context to this branch";
+      chip.addEventListener("click", () => {
+        ws.send(JSON.stringify({ tree_switch: { node: n.id } }));
+      });
+      chips.push(chip);
+    });
+  });
+  if (chips.length) {
+    const label = document.createElement("span");
+    label.textContent = "branches:";
+    label.className = "branch-label";
+    holder.appendChild(label);
+    chips.forEach(c => holder.appendChild(c));
+  }
+}
 function ensureTurn() {
   // Slash commands and late frames can arrive with no open turn (the
   // server sends no "assistant" row for /image, and a notice can land
@@ -1145,6 +1262,10 @@ function wireSocket() {
     case "core":
       document.getElementById("core-text").textContent =
         m.loaded ? (m.text || "(empty)") : "(no CORE.md loaded)";
+      break;
+    case "tree":
+      applyTreeState(m);
+      renderBranchSwitcher();
       break;
     case "raw":
       // unhandled line kinds (slash-command output) render as muted prose
@@ -1708,6 +1829,17 @@ document.getElementById("skills-close").addEventListener("click", () => {
 // page's instant-paint guess at the last conversation -- the server's
 // restore frames are the truth that replace it.
 restoreCache();
+// The tree arrives with the server's first frames; ask for it once
+// the socket is open so branch chips render before the first turn.
+(function askForTree() {
+  const send = () => {
+    if (wsConnected) { try {
+      ws.send(JSON.stringify({ tree_show: true }));
+    } catch (e) {} }
+    else setTimeout(send, 1000);
+  };
+  setTimeout(send, 500);
+})();
 
 const dialog = document.getElementById("options-dialog");
 const themeSel = document.getElementById("opt-theme");
@@ -2004,45 +2136,19 @@ class WebChat(ChatUI):
     # -- handlers, so a restored transcript is visually identical ----------
     def send_history(self, messages: list[dict[str, Any]]) -> None:
         """Repaint stored messages as frames through the page's handlers."""
-        import re as _re
-
-        fence_re = _re.compile(r"```tool\n(\{.*?\})\n```", _re.DOTALL)
-        for message in messages:
-            role = message.get("role")
-            if role == "user":
-                body = str(message.get("content", ""))
-                if body.startswith("TOOL RESULT for"):
-                    head, _, rest = body.partition("\n")
-                    name = head.replace("TOOL RESULT for ", "")
-                    self._frame({"kind": "tool_result", "ok": True,
-                                 "text": rest.strip()[:800]})
-                    continue
-                self._frame({"kind": "you", "text": body})
-            elif role == "assistant":
-                self._frame({"kind": "assistant"})
-                body = str(message.get("content", ""))
-                calls = message.get("tool_calls") or []
-                for call in calls:
-                    function = call.get("function") or {}
-                    self._frame({"kind": "tool_call",
-                                 "text": summarize_call(
-                                     str(function.get("name", "")),
-                                     function.get("arguments") or {})})
-                shown = fence_re.sub("", body).strip()
-                if shown:
-                    self._frame({"kind": "delta", "text": shown})
-                self._frame({"kind": "turn_end"})
-            elif role == "tool":
-                # native-protocol results: role "tool" carries the
-                # "name -> ok/error" summary plus the body
-                body = str(message.get("content", ""))
-                head, _, rest = body.partition("\n")
-                self._frame({"kind": "tool_result", "ok": True,
-                             "text": rest.strip()[:800]})
+        for frame in self.render_history(messages):
+            self._frame(frame)
         # Images the conversation generated: each rendered as its own
         # alternating turn (an assistant row, then the image) -- the same
         # back-and-forth flow as text, instead of a pile dumped after
         # the transcript. Newest first, capped.
+        for frame in self.render_images():
+            self._frame(frame)
+
+    def render_images(self) -> list[dict[str, Any]]:
+        """The image-turn frames for a repaint -- same shape the live
+        path sends, sidecar request included."""
+        frames: list[dict[str, Any]] = []
         try:
             images = sorted(
                 (self.ui_session_root() / "images").glob("*.png"),
@@ -2050,7 +2156,7 @@ class WebChat(ChatUI):
         except OSError:
             images = []
         for path in images[:20]:
-            self._frame({"kind": "assistant"})
+            frames.append({"kind": "assistant"})
             frame: dict[str, Any] = {"kind": "image",
                                      "path": f"images/{path.name}"}
             # The sidecar written at generation time carries the prompt
@@ -2061,8 +2167,50 @@ class WebChat(ChatUI):
                 frame["request"] = json.loads(sidecar.read_text())
             except (OSError, ValueError):
                 pass
-            self._frame(frame)
-            self._frame({"kind": "turn_end"})
+            frames.append(frame)
+            frames.append({"kind": "turn_end"})
+        return frames
+
+    def render_history(self, messages: list[dict[str, Any]]
+                       ) -> list[dict[str, Any]]:
+        """The frame list a repaint of `messages` consists of -- the
+        caller sends it (send_history) or broadcasts it (webui's
+        repaint_chain). Pure: no sends."""
+        import re as _re
+
+        fence_re = _re.compile(r"```tool\n(\{.*?\})\n```", _re.DOTALL)
+        frames: list[dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role")
+            if role == "user":
+                body = str(message.get("content", ""))
+                if body.startswith("TOOL RESULT for"):
+                    head, _, rest = body.partition("\n")
+                    name = head.replace("TOOL RESULT for ", "")
+                    frames.append({"kind": "tool_result", "ok": True,
+                                   "text": rest.strip()[:800]})
+                    continue
+                frames.append({"kind": "you", "text": body})
+            elif role == "assistant":
+                frames.append({"kind": "assistant"})
+                body = str(message.get("content", ""))
+                calls = message.get("tool_calls") or []
+                for call in calls:
+                    function = call.get("function") or {}
+                    frames.append({"kind": "tool_call",
+                                   "text": summarize_call(
+                                       str(function.get("name", "")),
+                                       function.get("arguments") or {})})
+                shown = fence_re.sub("", body).strip()
+                if shown:
+                    frames.append({"kind": "delta", "text": shown})
+                frames.append({"kind": "turn_end"})
+            elif role == "tool":
+                body = str(message.get("content", ""))
+                head, _, rest = body.partition("\n")
+                frames.append({"kind": "tool_result", "ok": True,
+                               "text": rest.strip()[:800]})
+        return frames
 
     def ui_session_root(self) -> Path:
         return self.session.workspace.root
@@ -2080,6 +2228,129 @@ class WebChat(ChatUI):
         for key, value in self.session.describe():
             self.line(f"{key:>10}: {value}")
         self.line("type /help for commands; the web front end adds none")
+
+
+class TurnTree:
+    """The conversation as a graph: the context window is the root and
+    every turn is a node whose parent is the turn it followed.
+
+    The engine's session holds the ACTIVE chain (root -> ... -> leaf);
+    this tree holds every branch ever taken. Before a turn runs, the
+    active chain is projected into ``session.messages``; after it, the
+    new user+assistant messages are recorded as a node on the chain.
+    Switching branches = repointing the active leaf and re-projecting.
+
+    Image turns (/image button or command) are nodes like any other:
+    the button inserts the "/image <prompt>" node, the generation is its
+    response content.
+    """
+
+    def __init__(self) -> None:
+        # node = {"id": int, "parent": int|None, "user": str,
+        #         "assistant": [messages], "kind": "chat"|"image"}
+        self.nodes: dict[int, dict] = {}
+        self.order: list[int] = []          # discovery order, stable ids
+        self.active: int | None = None      # the leaf we prompt against
+        self._next = 1
+
+    def _mk(self, parent: int | None, kind: str = "chat") -> int:
+        nid = self._next
+        self._next += 1
+        self.nodes[nid] = {"id": nid, "parent": parent, "user": "",
+                          "assistant": [], "kind": kind}
+        self.order.append(nid)
+        return nid
+
+    def chain(self, nid: int | None) -> list[int]:
+        """Root -> ... -> nid (inclusive)."""
+        out: list[int] = []
+        while nid is not None:
+            out.append(nid)
+            nid = self.nodes[nid]["parent"]
+        return list(reversed(out))
+
+    def children(self, nid: int | None) -> list[int]:
+        return [n for n in self.order
+                if self.nodes[n]["parent"] == nid]
+
+    def messages_for(self, nid: int | None) -> list[dict]:
+        """The engine messages along the chain to nid -- the branch's
+        full context, exactly what the model should see."""
+        out: list[dict] = []
+        for n in self.chain(nid):
+            node = self.nodes[n]
+            if node["user"]:
+                out.append({"role": "user", "content": node["user"]})
+            out.extend(node["assistant"])
+        return out
+
+    def append_turn(self, user: str, assistant: list[dict]) -> int:
+        """Record a completed turn as a child of the active leaf and
+        advance the active pointer to it."""
+        nid = self._mk(self.active)
+        node = self.nodes[nid]
+        node["user"] = user
+        node["assistant"] = assistant
+        self.active = nid
+        return nid
+
+    def branch(self, from_node: int) -> int:
+        """Fork a new path from an existing node WITHOUT creating an
+        empty intermediate: the active pointer moves to the fork's
+        parent, so the operator's next prompt becomes the sibling
+        node itself, with the fork's parent context."""
+        self.active = self.nodes[from_node]["parent"]
+        return from_node
+
+    def switch(self, nid: int) -> bool:
+        """Make an existing node the active leaf (its chain becomes the
+        context). Only one branch is active at a time."""
+        if nid not in self.nodes:
+            return False
+        self.active = nid
+        return True
+
+    def describe(self, with_content: bool = True) -> dict:
+        """The whole tree for the client: nodes with parent links, the
+        active chain, and each node's summary."""
+        nodes = []
+        for nid in self.order:
+            node = self.nodes[nid]
+            entry = {"id": nid, "parent": node["parent"],
+                     "kind": node["kind"], "active_chain":
+                         nid in set(self.chain(self.active))}
+            if node["user"]:
+                entry["user"] = node["user"][:80]
+            if with_content:
+                entry["has_image"] = any(
+                    m.get("role") == "assistant"
+                    and "images/" in str(m.get("content", ""))
+                    for m in node["assistant"])
+            nodes.append(entry)
+        return {"nodes": nodes, "active": self.active}
+
+    def adopt(self, messages: list[dict]) -> None:
+        """Bootstrap the tree from a flat history (server restart or
+        session load): each user turn becomes a node on one chain.
+        System messages are skipped -- the engine re-derives its own;
+        the tree carries only conversation turns."""
+        if self.nodes:
+            return
+        pending_assistant: list[dict] = []
+        for m in messages:
+            if m.get("role") == "system":
+                continue
+            if m.get("role") == "user":
+                if self.active is not None and pending_assistant:
+                    self.nodes[self.active]["assistant"] = pending_assistant
+                    pending_assistant = []
+                nid = self._mk(self.active)
+                self.nodes[nid]["user"] = str(m.get("content", ""))
+                self.active = nid
+            else:
+                pending_assistant.append(m)
+        if self.active is not None and pending_assistant:
+            self.nodes[self.active]["assistant"] = pending_assistant
 
 
 class SessionManager:
@@ -2223,6 +2494,25 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 SOCKETS.discard(sock)
 
+    async def repaint_chain(broadcast_tree: bool = False,
+                            **tree_extra) -> None:
+        """Repaint every tab with the ACTIVE chain -- and REPLACE the
+        history log with exactly the frames sent, so a later connect
+        replays the current branch, not a pile-up of every branch ever
+        painted. Used by tree_switch and /session load."""
+        frames: list[dict[str, Any]] = [{"kind": "clear"},
+                                         {"kind": "restore_begin"}]
+        frames.extend(ui.render_history(ui.session.messages))
+        frames.extend(ui.render_images())
+        frames.append({"kind": "restore_end"})
+        if broadcast_tree:
+            frames.append({"kind": "tree", **TREE.describe(),
+                           **tree_extra})
+        HISTORY.clear()
+        HISTORY.extend(dict(f) for f in frames)
+        for frame in frames:
+            await send_pub(dict(frame))
+
     # -- ONE server-side session, every connection a view onto it -----------
     # Session management is entirely server-side: a single WebChat/engine
     # session lives for the server's lifetime; every tab connects, gets
@@ -2236,12 +2526,17 @@ def main() -> int:
     ui.set_gen_registry(GEN)
     ui.set_relay_publisher(send_pub)
     sessions = SessionManager(ui)
+    #: The conversation graph: the context window is the root, every
+    #: turn a node, branches orthogonal paths off any node.
+    TREE = TurnTree()
     #: The engine session adopts the autosave at STARTUP, so a server
     #: restart continues the conversation too.
     try:
         sessions.load(SessionManager.AUTOSAVE)
     except Exception:  # noqa: BLE001 - a bad file is a fresh chat
         pass
+    # ...and the tree adopts the loaded history: one chain of nodes.
+    TREE.adopt(ui.session.messages)
     #: One turn at a time: two tabs typing at once serialize here.
     TURN_LOCK = asyncio.Lock()
 
@@ -2350,16 +2645,14 @@ def main() -> int:
                     if verb == "load":
                         ok, note = sessions.load(name)
                         # Loading REPLACES the server-side conversation:
-                        # clear + repaint goes to EVERY tab, the frame
-                        # log IS the new transcript, and the autosave
-                        # follows so a restart adopts it too.
-                        HISTORY.clear()
-                        await send_pub({"kind": "clear"})
-                        await send_pub({"kind": "restore_begin"})
-                        if ok:
-                            ui.send_history(ui.session.messages)
+                        # repaint goes to EVERY tab through repaint_chain
+                        # (which also replaces HISTORY, so a later connect
+                        # replays the loaded session only), and the tree
+                        # re-adopts the flat history as one chain.
+                        TREE.__init__()
+                        TREE.adopt(ui.session.messages)
+                        await repaint_chain(broadcast_tree=True)
                         await send_pub({"kind": "notice", "text": note})
-                        await send_pub({"kind": "restore_end"})
                         sessions.save(SessionManager.AUTOSAVE)
                         continue
                     if verb == "save":
@@ -2820,6 +3113,69 @@ def main() -> int:
                         else "", "path": str(soul.path or ""),
                         "loaded": soul.loaded})
                     continue
+                # -- the conversation graph: branch and switch ---------
+                if isinstance(message.get("tree_branch"), dict):
+                    req = message["tree_branch"]
+                    try:
+                        from_node = int(req.get("from", 0))
+                    except (TypeError, ValueError):
+                        from_node = 0
+                    if from_node not in TREE.nodes:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": f"no node {from_node} to branch from"})
+                        continue
+                    async with TURN_LOCK:
+                        fork = TREE.nodes[from_node]
+                        TREE.branch(from_node)
+                        # The new path's context = the chain to the
+                        # fork's parent. The NEXT prompt becomes the
+                        # sibling node; nothing empty is recorded.
+                        sysmsgs = [m for m in ui.session.messages
+                                   if m.get("role") == "system"]
+                        ui.session.messages[:] = sysmsgs + \
+                            TREE.messages_for(TREE.active)
+                        await send_pub({"kind": "tree",
+                                        **TREE.describe(),
+                                        "forked_from": from_node})
+                        await send_pub({
+                            "kind": "notice",
+                            "text": "branched at that turn: your next "
+                                    "prompt opens the new path; the old "
+                                    "one stays reachable from the branch "
+                                    "chips"})
+                    continue
+                if isinstance(message.get("tree_switch"), dict):
+                    req = message["tree_switch"]
+                    try:
+                        nid = int(req.get("node", 0))
+                    except (TypeError, ValueError):
+                        nid = 0
+                    if nid not in TREE.nodes:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": f"no node {nid} to switch to"})
+                        continue
+                    async with TURN_LOCK:
+                        if not TREE.switch(nid):
+                            await websocket.send_json({
+                                "kind": "notice",
+                                "text": f"cannot switch to {nid}"})
+                            continue
+                        # Repaint every tab with the new active chain:
+                        # the engine messages BECOME that chain.
+                        sysmsgs = [m for m in ui.session.messages
+                                   if m.get("role") == "system"]
+                        ui.session.messages[:] = sysmsgs + \
+                            TREE.messages_for(TREE.active)
+                        await repaint_chain(broadcast_tree=True,
+                                            switched_to=nid)
+                        sessions.save(SessionManager.AUTOSAVE)
+                    continue
+                if message.get("tree_show") is True:
+                    await websocket.send_json({"kind": "tree",
+                                                **TREE.describe()})
+                    continue
                 text = str(message.get("text", "")).strip()
                 if not text:
                     continue
@@ -2858,6 +3214,10 @@ def main() -> int:
                         pass
                     continue
                 await send_pub({"kind": "you", "text": text})
+                # -- tree bookkeeping: the turn runs against the ACTIVE
+                # chain; record the node when the turn completes.
+                tree_turn_user = text
+                tree_prior = len(ui.session.messages)
                 # The GPU is one card shared with image generation. After an
                 # image turn the model is merely unloaded (slow reload); after
                 # a swap the whole llm service is *down* and the turn would
@@ -2914,6 +3274,19 @@ def main() -> int:
                                     "card; this can take a minute)"})
                         break
                 await loop.run_in_executor(None, ui.ask, text)
+                # Tree bookkeeping: the engine appended the user message
+                # AND its response to session.messages; the node's own
+                # `user` text is tree_turn_user, so the node's content
+                # is ONLY what followed the user row (dropping the
+                # duplicate user entry messages_for would re-add).
+                tree_msgs = ui.session.messages[tree_prior:]
+                resp_only = tree_msgs[1:] if (
+                    tree_msgs and tree_msgs[0].get("role") == "user"
+                    and str(tree_msgs[0].get("content", "")) == tree_turn_user
+                ) else tree_msgs
+                nid = TREE.append_turn(tree_turn_user, list(resp_only))
+                await send_pub({"kind": "tree", **TREE.describe(),
+                                "new_node": nid})
                 # Autosave after every completed turn: "restore last
                 # session" must mean the conversation as it stands, not
                 # as it stood when the operator last remembered to save.
