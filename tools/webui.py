@@ -2103,9 +2103,9 @@ def main() -> int:
         except Exception:  # noqa: BLE001 - a bad file is a fresh chat
             restored = False
         await websocket.send_json({
-            "kind": "meta", "model": chat_config.model,
+            "kind": "meta", "model": ui.session.config.model,
             "protocol": ui.session.protocol,
-            "num_ctx": chat_config.num_ctx,
+            "num_ctx": ui.session.config.num_ctx,
             "theme": saved_theme or "k0b0l-dark",
             "restored": restored,
         })
@@ -2568,9 +2568,9 @@ def main() -> int:
                     save_theme(wanted_theme)
                     saved_theme = wanted_theme
                     await websocket.send_json({
-                        "kind": "meta", "model": chat_config.model,
+                        "kind": "meta", "model": ui.session.config.model,
                         "protocol": ui.session.protocol,
-                        "num_ctx": chat_config.num_ctx,
+                        "num_ctx": ui.session.config.num_ctx,
                         "theme": wanted_theme})
                     continue
                 text = str(message.get("text", "")).strip()
@@ -2653,12 +2653,12 @@ def main() -> int:
                 except Exception:  # noqa: BLE001 - a probe must not kill the turn
                     rows = []
                 for row in rows:
-                    if (str(row.get("id")) == chat_config.model
+                    if (str(row.get("id")) == ui.session.config.model
                             and str(row.get("state", "")).lower()
                             == "unloaded"):
                         await websocket.send_json({
                             "kind": "notice",
-                            "text": f"loading {chat_config.model} "
+                            "text": f"loading {ui.session.config.model} "
                                     "(weights were swapped off the card; "
                                     "this can take a minute)"})
                         break
