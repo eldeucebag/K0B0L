@@ -56,7 +56,7 @@ rt_harness/
   tools.py        the confined file workspace the chat's tools act on
   memory.py       the model's long-term memory store (SQLite FTS5 + graph)
   skills.py       SKILL.md parsing, discovery, the requires-chain
-  soul.py         SOUL.md: the standing identity block
+  soul.py         CORE.md: the standing identity block
   themes.py       fourteen themes, retro palettes, state migration
   tui.py          plain chat front end and shared command dispatch
   textual_chat.py the Textual front end: transcript, folds, pickers,
@@ -251,10 +251,10 @@ Notes:
 
 ## Soul
 
-`SOUL.md` is the assistant's standing text — voice, defaults, how it works with
+`CORE.md` is the assistant's standing text — voice, defaults, how it works with
 you — and it is loaded automatically as the first block of the system message.
 `--no-soul` (or `CHAT_SOUL=0`) turns it off, `--soul-file PATH` picks a
-different one, a `SOUL.md` in the chat's root outranks the shipped one, and
+different one, a `CORE.md` in the chat's root outranks the shipped one, and
 `/soul` shows which file is in force. It is not the operator's system prompt
 (`CHAT_SYSTEM_FILE`) and not a skill: it loads whether or not you ask for it.
 

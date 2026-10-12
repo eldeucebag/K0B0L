@@ -20,7 +20,7 @@ can fetch any of these with the `read_docs` tool; you can read one with
 | `semantic` | Colouring data in the transcript: what gets coloured, and in whose palette |
 | `keys` | Keyboard and menu bar |
 | `config` | Environment variables and CLI flags, in one place |
-| `soul` | `SOUL.md`: the standing identity file |
+| `soul` | `CORE.md`: the standing identity file |
 | `skills` | SKILL.md skills: the portable directory format, triggers, progressive disclosure |
 | `docs` | This directory: how the model reads it, how to add a topic |
 | `tools` | The file and info tools the model may call |

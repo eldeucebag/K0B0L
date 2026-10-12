@@ -11,8 +11,8 @@ Lookup order, first hit wins:
 2. ``CORE.md`` in the session's working root (a per-project core),
 3. ``CORE.md`` next to the package (the shipped default).
 
-``SOUL.md`` is still accepted at every step, so a session that already has one
-keeps working; ``CORE.md`` wins when both sit in the same directory.
+Only ``CORE.md`` is accepted at every step -- the harness's core file is
+CORE.md, full stop (a stray SOUL.md never hijacks the identity block).
 
 ``load_soul`` never raises: a missing or unreadable file is reported as
 unloaded and the session runs without one.
@@ -28,8 +28,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .config import ChatConfig
 
 #: Filenames accepted inside a directory, in order. CORE.md is the name;
-#: SOUL.md is still read, so a session that already has one keeps working.
-SOUL_NAMES = ("CORE.md", "core.md", "SOUL.md", "soul.md")
+#: the SOUL.md spellings are GONE -- the harness's core file is CORE.md,
+#: and a stray SOUL.md must not hijack the identity block.
+SOUL_NAMES = ("CORE.md", "core.md")
 
 #: The core file that ships with the harness.
 DEFAULT_SOUL_PATH = Path(__file__).resolve().parents[1] / SOUL_NAMES[0]

@@ -39,6 +39,6 @@ A different directory can be used with `CHAT_DOCS_DIR` / `--docs-dir`, and
 | `docs/commands` | Every slash command and the CLI equivalents |
 | `docs/keys` | Menu bar, Esc, function keys |
 | `docs/config` | Env vars and flags |
-| `docs/soul` | `SOUL.md`, and how to disable it |
+| `docs/soul` | `CORE.md`, and how to disable it |
 
 `docs/README.md` is the index for a human reader; it is not itself a topic.

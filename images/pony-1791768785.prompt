@@ -1,0 +1,6 @@
+{
+  "prompt": "sidecar probe: a small orange tetrahedron",
+  "model": "pony",
+  "steps": 2,
+  "seed": 123
+}

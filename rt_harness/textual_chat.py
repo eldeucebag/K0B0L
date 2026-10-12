@@ -332,7 +332,7 @@ class SuggestorForChat(Suggester):
 _COMMANDS = ["/help", "/tools", "/think", "/read", "/run", "/paste",
              "/model", "/models", "/target", "/root", "/clear", "/history",
              "/compact", "/image", "/exit", "/theme", "/semantic",
-             "/skills", "/session", "/docs", "/soul"]
+             "/skills", "/session", "/docs", "/soul", "/core"]
 
 #: One-line descriptions for the Ctrl-P command dispatch. Filled by texting.
 COMMAND_INFO = {
@@ -358,7 +358,8 @@ COMMAND_INFO = {
     "/skills": "manage prompt-injection skills",
     "/session": "save or load a chat session",
     "/docs": "list or read the product docs",
-    "/soul": "show the soul file in force",
+    "/soul": "alias of /core (CORE.md)",
+    "/core": "show the CORE.md this session runs under",
 }
 
 
@@ -1880,7 +1881,7 @@ class TextualChatUI(ChatUI):
             ("Help", [
                 MenuItem(label="Help panel", action=self.action_help),
                 MenuItem(label="Product docs", action=lambda: self.dispatch("/docs")),
-                MenuItem(label="Soul file", action=lambda: self.dispatch("/soul")),
+                MenuItem(label="Core file", action=lambda: self.dispatch("/core")),
                 MenuItem(label="Quit", action=self._exit),
             ]),
         ]

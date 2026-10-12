@@ -1,0 +1,16 @@
+{
+  "model": "pony",
+  "prompt": "Masterpiece, Exquisite erotic nude of a redheaded pawg in her late 20's striking an intimate and explicit pose, caught in a deeplyembarassing situation",
+  "negative_prompt": "",
+  "width": 1024,
+  "height": 1024,
+  "steps": 16,
+  "seed": -1,
+  "sampler": "dpm++2m_sde",
+  "scheduler": "karras",
+  "rng": "",
+  "cfg": 7,
+  "eta": null,
+  "batch_count": 1,
+  "mode": "txt2img"
+}

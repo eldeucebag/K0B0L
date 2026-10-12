@@ -47,7 +47,7 @@ HELP = """commands
   /fold [what]       fold reasoning|code|all (default all); /unfold opens them
   /read <path>       print a file into the chat
   /docs [topic]      list the product docs, or print one (the model has read_docs)
-  /soul              show the soul file this session loaded
+  /core              show the CORE.md this session loaded (/soul: alias)
   /skills list|enable|disable   manage skills: list, or pin one into every turn
   /skills edit [name]          open the skills editor (Textual front end)
   /session save|load|list <name>  persist or resume this chat
@@ -514,7 +514,9 @@ class ChatUI(ChatHooks):
                     self.line(f"no document {argument!r}; /docs lists them")
                 else:
                     self.line(text)
-        elif command == "/soul":
+        elif command in ("/soul", "/core"):
+            # /core is the real name (the file is CORE.md); /soul stays
+            # as the alias every existing muscle memory types.
             from .soul import load_soul
 
             soul = load_soul(self.config, self.session.workspace.root)

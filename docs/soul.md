@@ -1,6 +1,6 @@
-# SOUL.md
+# CORE.md (the soul)
 
-`SOUL.md` is the assistant's standing text: who it is and how it works, as
+`CORE.md` is the assistant's standing text: who it is and how it works, as
 opposed to what this session wants. It is loaded automatically, and it is the
 first thing in the system message — before the operator's prompt, the working
 directory, the skills, and the docs index.
@@ -18,9 +18,9 @@ directory, the skills, and the docs index.
 First hit wins:
 
 1. `CHAT_SOUL_FILE`, or `--soul-file PATH` — explicit
-2. `SOUL.md` (or `soul.md`) in the chat's root — `CHAT_ROOT`, so a project can
+2. `CORE.md` (or `core.md`) in the chat's root — `CHAT_ROOT`, so a project can
    carry its own
-3. `SOUL.md` next to the package — the shipped default
+3. `CORE.md` next to the package — the shipped default
 
 A file that exists but is empty counts as no soul. A missing file is not an
 error: the session simply runs without one, and says so.

@@ -1,12 +1,13 @@
-"""Soul tests: is SOUL.md loaded by default, and does it stay out of the way?
+"""Soul tests: is CORE.md loaded by default, and does it stay out of the way?
 
 No model, no terminal, no Textual -- this is the lookup order and the system
 message block, which is where a standing prompt can go wrong quietly.
 
 Fixtures are written into a temp directory by this test itself: the explicit
-file case uses a name of its own, the root case uses the lowercase ``soul.md``
+file case uses a name of its own, the root case uses the lowercase ``core.md``
 spelling the loader also accepts. Nothing here touches the repository's own
-SOUL.md.
+CORE.md. A stray ``SOUL.md`` must NOT be picked up: the harness's core file
+is CORE.md, full stop.
 """
 
 from __future__ import annotations
@@ -45,11 +46,11 @@ def write(path: Path, text: str) -> Path:
 
 with tempfile.TemporaryDirectory() as tmp:
     work = Path(tmp)
-    explicit = write(work / "custom-soul.md", "You are terse.")
+    explicit = write(work / "custom-core.md", "You are terse.")
     root = work / "root"
     root.mkdir()
-    write(root / "soul.md", "You are the project's.")
-    empty = write(work / "empty-soul.md", "   \n")
+    write(root / "core.md", "You are the project's.")
+    empty = write(work / "empty-core.md", "   \n")
 
     # -- default is on ---------------------------------------------------
     default = ChatConfig()
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory() as tmp:
     check("nothing is configured to override it", default.soul_file == "")
     check(
         "the shipped soul is looked for at the repo root",
-        DEFAULT_SOUL_PATH.name == "SOUL.md" and DEFAULT_SOUL_PATH.parent == REPO,
+        DEFAULT_SOUL_PATH.name == "CORE.md" and DEFAULT_SOUL_PATH.parent == REPO,
         str(DEFAULT_SOUL_PATH),
     )
 
@@ -77,7 +78,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # -- then the session root -------------------------------------------
     rooted = load_soul(ChatConfig(), root)
-    check("a soul next to the work is used", rooted.path == root / "soul.md")
+    check("a soul next to the work is used", rooted.path == root / "core.md")
     check("and it is the one that speaks", "project's" in rooted.text)
 
     # -- explicit beats root ---------------------------------------------
@@ -88,16 +89,27 @@ with tempfile.TemporaryDirectory() as tmp:
     blank = load_soul(ChatConfig(soul_file=str(empty)), root)
     check(
         "an empty file is not a soul, so the search continues",
-        blank.loaded and blank.path == root / "soul.md",
+        blank.loaded and blank.path == root / "core.md",
         f"got {blank.source} {blank.path}",
+    )
+
+    # -- a stray SOUL.md is NOT a core ------------------------------------
+    stray = work / "stray"
+    stray.mkdir()
+    write(stray / "SOUL.md", "You are the WRONG file.")
+    hijacked = load_soul(ChatConfig(), stray)
+    check(
+        "a stray SOUL.md never hijacks the identity",
+        "WRONG file" not in hijacked.text,
+        f"got {hijacked.source} {hijacked.path}",
     )
 
     # -- a missing file is not an error ----------------------------------
     # Nothing anywhere means the shipped soul has to be out of the way as
-    # well: with a SOUL.md at the repo root, the default candidate always
+    # well: with a CORE.md at the repo root, the default candidate always
     # resolves, and "missing" would never be tested.
     shipped_path = soul_module.DEFAULT_SOUL_PATH
-    soul_module.DEFAULT_SOUL_PATH = work / "no-such-soul.md"
+    soul_module.DEFAULT_SOUL_PATH = work / "no-such-core.md"
     try:
         missing = load_soul(ChatConfig(soul_file=str(work / "nope.md")), work / "nowhere")
         check("a missing soul is not fatal", missing.source == "missing" and not missing.loaded)
@@ -128,7 +140,7 @@ from rt_harness.client import OllamaClient  # noqa: E402
 client = OllamaClient("http://127.0.0.1:9")
 with tempfile.TemporaryDirectory() as tmp2:
     live = Path(tmp2)
-    (live / "soul.md").write_text("You are terse.\n", encoding="utf-8")
+    (live / "core.md").write_text("You are terse.\n", encoding="utf-8")
     mine = live / "mine.md"
     mine.write_text("You are terse and you keep a project's history in mind.\n", encoding="utf-8")
 

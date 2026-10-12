@@ -48,7 +48,7 @@ is why the CLI only ever *replaces* fields it was handed.
 | `CHAT_HISTORY_TURNS` | Turns kept before trimming | `40` |
 | `CHAT_THINK` | Show reasoning tokens | model default |
 | `CHAT_SYSTEM_FILE` | Operator system prompt (falls back to `SYSTEM_PROMPT_FILE`) | built-in default |
-| `CHAT_SOUL` | Load `SOUL.md` | on |
+| `CHAT_SOUL` | Load `CORE.md` | on |
 | `CHAT_SOUL_FILE` | Explicit soul file | — |
 | `CHAT_DOCS_DIR` | Directory the docs index and `read_docs` read | the shipped `docs/` |
 | `CHAT_SEMANTIC` | Colour data in the transcript | on |

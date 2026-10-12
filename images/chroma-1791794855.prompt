@@ -1,0 +1,16 @@
+{
+  "model": "chroma",
+  "prompt": "Masterpiece, Exquisite erotic nude polaroid of a redheaded pawg in her early 30's striking an intimate and embarassing pose",
+  "negative_prompt": "Deformed, drawing, render, 3d, game, anime, bad hands, disfiguree",
+  "width": 1024,
+  "height": 1024,
+  "steps": 16,
+  "seed": -1,
+  "sampler": "heun",
+  "scheduler": "flux2",
+  "rng": "",
+  "cfg": 7,
+  "eta": null,
+  "batch_count": 1,
+  "mode": "txt2img"
+}

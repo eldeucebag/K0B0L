@@ -280,6 +280,32 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   cursor: pointer; font-size: 14px; line-height: 1;
 }
 .hbtn:hover { color: var(--accent); border-color: var(--accent); }
+.skills-list { display: grid; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.skill-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--band); border-radius: 8px; padding: 8px 12px;
+}
+.skill-row .sk-name { font-family: var(--mono); color: var(--ink);
+  font-size: 13px; flex-shrink: 0; }
+.skill-row .sk-desc { color: var(--muted); font-size: 12px;
+  overflow-wrap: anywhere; }
+.skill-row button {
+  margin-left: auto; flex-shrink: 0;
+  background: var(--surface); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 11.5px; padding: 3px 10px; cursor: pointer;
+  font-family: var(--mono);
+}
+.skill-row button.on { color: var(--accent); border-color: var(--accent); }
+.skill-row button:hover { color: var(--accent); border-color: var(--accent); }
+.core-details summary { color: var(--muted); font-size: 12.5px;
+  cursor: pointer; margin-top: 10px; }
+.core-text {
+  margin: 8px 0 0; padding: 10px 12px; max-height: 30vh; overflow-y: auto;
+  background: var(--code-bg); border-radius: 8px;
+  color: var(--ink); font: 12.5px/1.5 var(--mono);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .genbar-wrap {
   margin: 2px 0 6px; display: grid; gap: 4px;
 }
@@ -451,6 +477,7 @@ dialog button.primary:hover { color: var(--accent-ink); }
   <span class="name">K<b>0</b>B<b>0</b>L</span>
   <span class="meta" id="meta">connecting…</span>
   <button id="image-btn" class="hbtn" title="generate an image">🎨</button>
+  <button id="skills-btn" class="hbtn" title="skills & core">🧠</button>
   <button id="history-btn" class="hbtn" title="sessions">≡</button>
   <button id="options" class="hbtn" title="options">⚙</button>
 </header>
@@ -601,6 +628,17 @@ dialog button.primary:hover { color: var(--accent-ink); }
   <div class="opt-actions">
     <button id="opt-clear">clear conversation</button>
     <button id="opt-close">close</button>
+  </div>
+</dialog>
+<dialog id="skills-dialog">
+  <h3>skills & core</h3>
+  <div id="skills-list" class="skills-list"></div>
+  <details class="core-details">
+    <summary>CORE.md (the identity this session speaks through)</summary>
+    <pre id="core-text" class="core-text"></pre>
+  </details>
+  <div class="opt-actions">
+    <button id="skills-close">close</button>
   </div>
 </dialog>
 <script>
@@ -1097,6 +1135,13 @@ function wireSocket() {
       break;
     case "session_list":
       renderSessionList(m.sessions || []);
+      break;
+    case "skills":
+      renderSkills(m.skills || [], m.active || []);
+      break;
+    case "core":
+      document.getElementById("core-text").textContent =
+        m.loaded ? (m.text || "(empty)") : "(no CORE.md loaded)";
       break;
     case "raw":
       // unhandled line kinds (slash-command output) render as muted prose
@@ -1599,6 +1644,53 @@ document.getElementById("hist-save").addEventListener("click", () => {
   box.value = "";
   setTimeout(() => ws.send(JSON.stringify({ session: { verb: "list" } })),
     200);
+});
+
+// -- skills & core panel (🧠) ---------------------------------------------
+function openSkills() {
+  document.getElementById("skills-dialog").showModal();
+  ws.send(JSON.stringify({ skills_list: true }));
+  ws.send(JSON.stringify({ core_show: true }));
+}
+function renderSkills(skills, active) {
+  const list = document.getElementById("skills-list");
+  list.innerHTML = "";
+  if (!skills.length) {
+    const empty = document.createElement("div");
+    empty.className = "sess-empty";
+    empty.textContent = "no skills discovered (workspace skills/ or ~/.k0b0l-skills)";
+    list.appendChild(empty);
+    return;
+  }
+  for (const sk of skills) {
+    const row = document.createElement("div");
+    row.className = "skill-row";
+    const name = document.createElement("div");
+    name.className = "sk-name";
+    name.textContent = sk.name;
+    const desc = document.createElement("div");
+    desc.className = "sk-desc";
+    desc.textContent = sk.description || "";
+    const btn = document.createElement("button");
+    const on = active.includes(sk.name);
+    btn.textContent = on ? "on" : "off";
+    btn.className = on ? "on" : "";
+    btn.title = on ? "pinned into every turn -- click to disable"
+                   : "available on demand -- click to pin into every turn";
+    btn.addEventListener("click", () => {
+      ws.send(JSON.stringify({ skills_set: { name: sk.name,
+        enabled: !on } }));
+      // re-request the list once the server confirms, so the state
+      // shown is the server's, not the click's guess
+      setTimeout(() => ws.send(JSON.stringify({ skills_list: true })), 400);
+    });
+    row.appendChild(name); row.appendChild(desc); row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+document.getElementById("skills-btn").addEventListener("click", openSkills);
+document.getElementById("skills-close").addEventListener("click", () => {
+  document.getElementById("skills-dialog").close();
 });
 
 // Paint the cached copy immediately; the server's restored history
@@ -2663,6 +2755,60 @@ def main() -> int:
                         "protocol": ui.session.protocol,
                         "num_ctx": ui.session.config.num_ctx,
                         "theme": wanted_theme})
+                    continue
+                # -- skills & core: the operator surface of what the
+                # session already knows (skills ride the system message;
+                # CORE.md is the identity it speaks through).
+                if message.get("skills_list") is True:
+                    skills = ui._skills()
+                    rows = []
+                    for skill in skills:
+                        rows.append({
+                            "name": skill.name,
+                            "description": getattr(
+                                skill, "description", "") or "",
+                            "enabled": skill.name
+                            in getattr(ui, "_selected_skills", []),
+                        })
+                    await websocket.send_json({
+                        "kind": "skills", "skills": rows,
+                        "active": list(getattr(ui, "_selected_skills",
+                                               []))})
+                    continue
+                if isinstance(message.get("skills_set"), dict):
+                    change = message["skills_set"]
+                    name = str(change.get("name", "")).strip()
+                    on = bool(change.get("enabled"))
+                    if not name:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": "skills_set needs a name"})
+                        continue
+                    sel = getattr(ui, "_selected_skills", [])
+                    if on and name not in sel:
+                        sel.append(name)
+                    if not on and name in sel:
+                        sel.remove(name)
+                    # Same contract as /skills enable|disable: the next
+                    # system message carries the new doctrine set.
+                    ui.session.reset()
+                    HISTORY.clear()
+                    await send_pub({"kind": "clear"})
+                    await send_pub({"kind": "notice", "text":
+                                    f"skills active: "
+                                    f"{', '.join(sel) or '(none)'}"})
+                    await send_pub({"kind": "turn_end"})
+                    sessions.save(SessionManager.AUTOSAVE)
+                    continue
+                if message.get("core_show") is True:
+                    from rt_harness.soul import load_soul
+
+                    soul = load_soul(ui.session.config,
+                                     ui.session.workspace.root)
+                    await websocket.send_json({
+                        "kind": "core", "text": soul.text if soul.loaded
+                        else "", "path": str(soul.path or ""),
+                        "loaded": soul.loaded})
                     continue
                 text = str(message.get("text", "")).strip()
                 if not text:

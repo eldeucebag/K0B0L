@@ -11,7 +11,7 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/think on\|off` | Show or hide the model's reasoning tokens |
 | `/read <path>` | Print a workspace file into the chat |
 | `/docs [topic]` | List the product docs, or print one |
-| `/soul` | Show the soul file this session loaded, and its path |
+| `/core` | Show the CORE.md this session loaded, and its path (alias: `/soul`) |
 | `/skills list\|enable\|disable <name>` | Manage skills: list, or pin/unpin one into every turn |
 | `/skills edit [name]` | Open the skills editor (see `docs/skills`); a name opens that skill directly |
 | `/compact` | Compress the conversation into one summary and continue from it — durable facts are written to the memory store, and earlier memories are recalled into the compacted context |
@@ -50,7 +50,7 @@ Every chat command has a shell-side counterpart, and the chat is what a bare
 
 ```bash
 python3 thinlizzy.py                              # this session (the default)
-python3 thinlizzy.py --no-soul                    # without SOUL.md
+python3 thinlizzy.py --no-soul                    # without CORE.md
 python3 thinlizzy.py --cycle --objective "..."    # the attack loop, unattended
 python3 thinlizzy.py --list-modes                 # modes and one-liners
 python3 thinlizzy.py --list-families              # deployment families
