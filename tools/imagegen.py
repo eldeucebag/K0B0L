@@ -397,6 +397,30 @@ def gen_advanced(model: str, prompt: str, out: str,
         print(f"unknown model {model!r}: {'/'.join(FILES)}", file=sys.stderr)
         return False
     out_path = _P(out).expanduser()
+
+    # Known-good floors per model: an unset (0/empty) knob falls to the
+    # model's sane default rather than sd.cpp's generic one, and a
+    # hostile/typo'd low value can't undercook a run. Chroma is
+    # Flux-class: 1024 native, 20+ steps or the output looks like
+    # un-denoised weave. Pony/qwen get their own defaults.
+    floors = {
+        "chroma": {"steps": 28, "cfg": 4.0, "width": 1024,
+                   "height": 1024, "sampler": "euler",
+                   "scheduler": "flux"},
+        "qwen":   {"steps": 30, "cfg": 4.0, "width": 1024,
+                   "height": 1024, "sampler": "euler",
+                   "scheduler": "simple"},
+        "pony":   {"steps": 24, "cfg": 7.0, "width": 1024,
+                   "height": 1024, "sampler": "euler",
+                   "scheduler": "karras"},
+    }.get(model, {})
+    if floors:
+        steps = int(steps) if steps else floors.get("steps", 0)
+        cfg = float(cfg) if cfg else floors.get("cfg", 0.0)
+        width = int(width) if width else floors.get("width", 1024)
+        height = int(height) if height else floors.get("height", 1024)
+        sampler = sampler or str(floors.get("sampler", ""))
+        scheduler = scheduler or str(floors.get("scheduler", ""))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     init_b64 = mask_b64 = ""

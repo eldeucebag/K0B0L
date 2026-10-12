@@ -1364,6 +1364,48 @@ const IMG_SCHEDULERS = ["discrete", "karras", "exponential", "ays", "gits",
   "bong_tangent", "ltx2", "logit_normal", "flux2", "flux", "beta",
   "llada_image"];
 
+// Per-model known-good presets, from each model's upstream docs. The
+// dialog pre-fills from these when the model changes, so an untouched
+// dialog generates something good instead of a half-denoised weave:
+// a Flux-class model at 6 steps / 512² / the Flux2 schedule is
+// exactly what undercooked output looks like.
+const MODEL_PRESETS = {
+  pony:   { steps: 24, cfg: 7, size: "1024x1024",
+            sampler: "euler", scheduler: "karras" },
+  qwen:   { steps: 30, cfg: 4, size: "1024x1024",
+            sampler: "euler", scheduler: "simple" },
+  chroma: { steps: 28, cfg: 4, size: "1024x1024",
+            sampler: "euler", scheduler: "flux" },
+};
+// "cfg 4" for chroma matches its upstream doc example; pony's SDXL
+// defaults want more guidance (7); qwen's DiT prefers low cfg (4).
+
+function applyModelPreset(model) {
+  // Fill the knobs with the model's known-good values. Only the
+  // technical knobs -- never the prompt, negative, or seed (seed -1
+  // stays random). An operator who already chose something keeps it:
+  // presets only land when the field is at its default/empty state.
+  const p = MODEL_PRESETS[model] || null;
+  if (!p) return;
+  const sizeSel = document.getElementById("img-size");
+  const stepsEl = document.getElementById("img-steps");
+  const cfgEl = document.getElementById("img-cfg");
+  const samplerSel = document.getElementById("img-sampler");
+  const schedSel = document.getElementById("img-scheduler");
+  if (!stepsEl.value) stepsEl.value = String(p.steps);
+  if (!cfgEl.value) cfgEl.value = String(p.cfg);
+  if (sizeSel.value === "" || sizeSel.value === "1024x1024"
+      || sizeSel.selectedIndex <= 0) {
+    sizeSel.value = p.size;
+  }
+  if (samplerSel.value === "" || samplerSel.value === "euler") {
+    samplerSel.value = p.sampler;
+  }
+  if (schedSel.value === "" || schedSel.value === "karras") {
+    schedSel.value = p.scheduler;
+  }
+}
+
 function fillSelect(id, names) {
   const sel = document.getElementById(id);
   const have = new Set(Array.from(sel.options).map((o) => o.value));
@@ -1401,8 +1443,13 @@ function openImageDialog(prefill) {
   }
   imageDialog.showModal();
   loadSamplers();
+  applyModelPreset(document.getElementById("img-model").value);
   document.getElementById("img-prompt").focus();
 }
+
+document.getElementById("img-model").addEventListener("change", () => {
+  applyModelPreset(document.getElementById("img-model").value);
+});
 
 document.getElementById("image-btn").addEventListener("click",
   () => openImageDialog(null));
