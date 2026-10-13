@@ -2543,9 +2543,19 @@ def main() -> int:
     #: A generation outlives the socket that requested it -- the operator
     #: refreshing mid-run must rejoin the animation, not lose it.
     GEN: dict[str, Any] = {"active": None, "last": None}
-    #: Every live WebSocket: image-generation frames broadcast to all of
-    #: them, so a second tab (or a refreshed one) sees the same run.
+    #: Every live WebSocket: image-generation frames broadcast to all
+    #: of them, so a second tab (or a refreshed one) sees the same run.
     SOCKETS: set = set()
+
+    #: The in-flight generation TASK (text turn or image op), hoisted to
+    #: serve scope on purpose: a generation is server-side state that
+    #: outlives whichever socket started it. Cancel must work from a
+    #: RECONNECTED tab (the Android freezer reconnects mid-run) or a
+    #: second tab -- a per-socket handle reads as empty there and the
+    #: operator gets "nothing is running" while text still streams.
+    #: One task at a time: TURN_LOCK serializes engine work; this handle
+    #: is what Cancel clicks race against.
+    current_task: dict[str, asyncio.Task | None] = {"task": None}
 
     #: Server-lifetime frame log (bounded): the replay every connect
     #: fast-forwards through. This IS the transcript of record.
@@ -2792,12 +2802,6 @@ def main() -> int:
             await websocket.send_json({"kind": "restore_end"})
         loop = asyncio.get_event_loop()
         SOCKETS.add(websocket)
-        # A turn runs as a TASK, not inline in the receive loop: the operator
-        # must be able to send {"cancel": true} from the SAME tab mid-turn
-        # (the inline shape blocked on receive_json and could never hear it).
-        # One task at a time: the TURN_LOCK already serializes engine work,
-        # but the task handle is what Cancel clicks race against.
-        current_task: dict[str, asyncio.Task | None] = {"task": None}
 
         async def run_turn(text: str) -> None:
             """One text turn: swap-state probe, model reload notice, engine
