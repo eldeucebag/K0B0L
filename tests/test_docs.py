@@ -121,7 +121,7 @@ unknown = sorted(word for word in commands if word not in code)
 check("every command the docs name exists in the code", not unknown, ", ".join(unknown))
 
 envs = set(re.findall(r"\b([A-Z][A-Z0-9_]{3,})\b", doc("config")))
-words = {"JSON", "HTTP", "CLI", "SOUL", "README", "URL", "API", "OLLAMA", "REDTEAM"}
+words = {"JSON", "HTTP", "CLI", "SOUL", "CORE", "README", "URL", "API", "OLLAMA", "REDTEAM"}
 envs -= words
 missing = sorted(word for word in envs if f'"{word}"' not in code)
 check("every env var the docs name exists in the code", not missing, ", ".join(missing))

@@ -273,6 +273,14 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   border-radius: 8px; padding: 0 20px; font-weight: 600; cursor: pointer;
 }
 #send:disabled { opacity: 0.4; cursor: default; }
+#send.cancel {
+  /* The button IS the cancel affordance while a generation runs: the
+     operator asked for cancel-in-place-of-send, not a greyed-out send.
+     Danger-tinted so the state change is visible at a glance. */
+  background: transparent; color: var(--err);
+  border: 1px solid var(--err);
+}
+#send.cancel:hover { background: var(--err); color: var(--accent-ink); }
 .hbtn {
   flex-shrink: 0;
   margin-left: auto; background: none; border: 1px solid var(--border);
@@ -710,6 +718,12 @@ function setBusy(on) {
   // before the turn header is drawn), and the input must never stay
   // wedged off because a turn element went away.
   busy = on;
+  // The send button becomes CANCEL while a turn runs -- the operator's
+  // request: not a greyed-out send, but an active stop control in the
+  // same place. Enabled (not disabled) so it can be clicked.
+  send.classList.toggle("cancel", on);
+  send.disabled = false;
+  send.textContent = on ? "cancel" : "send";
   if (typingEl) {
     typingEl.classList.toggle("busy", on);
   }
@@ -1232,7 +1246,7 @@ function wireSocket() {
       setBusy(false);
       turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null;
-      send.disabled = false; input.focus();
+      input.focus();
       persistCache();
       break;
     case "restore_begin":
@@ -1308,8 +1322,7 @@ function connectWS() {
   ws.onclose = () => {
     wsConnected = false;
     meta.textContent = "reconnecting…";
-    setBusy(false);
-    send.disabled = false;  // a dead socket must not wedge the input
+    setBusy(false);  // also resets the button to "send"
     scheduleReconnect();
   };
   ws.onerror = () => { /* onclose follows */ };
@@ -1348,8 +1361,14 @@ connectWS();
 
 document.getElementById("form").addEventListener("submit", (e) => {
   e.preventDefault();
+  // While a generation runs the button reads CANCEL and stops the run;
+  // a message typed during the run stays in the input, not lost.
+  if (busy) {
+    try { ws.send(JSON.stringify({"cancel": true})); } catch (err) {}
+    return;
+  }
   const text = input.value.trim();
-  if (!text || send.disabled) return;
+  if (!text) return;
   // A bare "/image" (optionally "<model> <prompt>") opens the image
   // dialog instead of sending the stripped-down command: the dialog is
   // the full surface (negative prompt, size, steps, seed).
@@ -1366,7 +1385,6 @@ document.getElementById("form").addEventListener("submit", (e) => {
     openImageDialog({ model: model, prompt: prompt });
     return;
   }
-  send.disabled = true;
   input.value = "";
   ws.send(JSON.stringify({ text }));
 });
@@ -2653,6 +2671,92 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 SOCKETS.discard(sock)
 
+    async def do_cancel(sock: "WebSocket") -> None:
+        """The one Cancel path for every generation kind.
+
+        - text turn: flip the client's cancel flag -- the stream loop
+          stops at the next chunk (one token), the engine ends the turn
+          gracefully, partial prose stays on the page and in history.
+        - image generation: sd.cpp's HTTP surface is synchronous (this
+          build has no /interrupt route; the async-jobs cancel refuses
+          jobs that are already generating), so the only real stop is
+          killing the sd-server process. The supervisor owns it; the
+          runner's own error path then swaps the card back to the llm
+          service -- the same recovery its timeout path already uses.
+          The run's terminal frames are logged and the run retired, so
+          no page sits wedged with dots on.
+        - mid-swap (llm service down, /swap/llm in flight): the cancel
+          lands as a notice and the swap completes; killing a swap would
+          strand the card with neither service up.
+        Broadcast the outcome so every tab's Cancel answers.
+        """
+        cancelled_image = False
+        if GEN["active"] is not None:
+            run = GEN["active"]
+            # The image path is the ONLY hard-stop: this sd.cpp build has
+            # no /interrupt route (the async-jobs cancel refuses jobs
+            # already generating), so the real stop is the supervisor:
+            # /swap/llm stops sd-server (which unblocks the runner's HTTP
+            # request with a reset connection) and brings the llm service
+            # back, so the card can never be stranded. The runner's own
+            # error path then sees the swap already handled.
+            try:
+                with urllib.request.urlopen(
+                        swap_api + "/state", timeout=2) as r:
+                    state = json.loads(r.read())
+            except Exception:  # noqa: BLE001 - no supervisor reachable
+                state = {}
+            await send_pub({
+                "kind": "notice",
+                "text": "cancel: bringing the GPU back to the llm "
+                        "service (the image generation is stopped)"})
+            try:
+                request = urllib.request.Request(
+                    swap_api + "/swap/llm", data=b"{}",
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=140) as r:
+                    json.loads(r.read())
+                await send_pub({
+                    "kind": "notice",
+                    "text": "the llm service is back"})
+            except Exception as exc:  # noqa: BLE001
+                await send_pub({
+                    "kind": "error",
+                    "text": f"cancel: could not restore the llm "
+                            f"service: {exc}"})
+            cancelled_image = True
+            # Close the run record the same way every path does, so no
+            # replay paints a wedged page. All synchronous, no awaits
+            # between the frames and retirement (cancellation-proof).
+            log_frame(run, {"kind": "notice",
+                            "text": "generation cancelled"})
+            log_frame(run, {"kind": "turn_end"})
+            log_frame(run, {"kind": "busy", "on": False})
+            run["ended"] = time.time()
+            GEN["last"] = run
+            GEN["active"] = None
+            try:
+                await send_pub({"kind": "notice",
+                                "text": "generation cancelled"})
+                await send_pub({"kind": "turn_end"})
+                await send_pub({"kind": "busy", "on": False})
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # text turn: cooperative, through the client flag. The
+            # engine's own turn_end + busy-off frames follow when the
+            # stream unwinds; nothing more to send here.
+            cancel = getattr(ui.session.client, "cancel_turn", None)
+            if callable(cancel):
+                cancel()
+                await send_pub({
+                    "kind": "notice",
+                    "text": "generation cancelled"})
+            else:
+                await send_pub({
+                    "kind": "notice",
+                    "text": "this client cannot cancel mid-turn"})
+
     async def page(request):
         return HTMLResponse(PAGE)
 
@@ -2688,6 +2792,503 @@ def main() -> int:
             await websocket.send_json({"kind": "restore_end"})
         loop = asyncio.get_event_loop()
         SOCKETS.add(websocket)
+        # A turn runs as a TASK, not inline in the receive loop: the operator
+        # must be able to send {"cancel": true} from the SAME tab mid-turn
+        # (the inline shape blocked on receive_json and could never hear it).
+        # One task at a time: the TURN_LOCK already serializes engine work,
+        # but the task handle is what Cancel clicks race against.
+        current_task: dict[str, asyncio.Task | None] = {"task": None}
+
+        async def run_turn(text: str) -> None:
+            """One text turn: swap-state probe, model reload notice, engine
+            ask, tree bookkeeping, autosave. The body is the old inline
+            block; the finally always closes the turn so a cancel can never
+            wedge the page in busy state."""
+            # -- tree bookkeeping: the turn runs against the ACTIVE
+            # chain; record the node when the turn completes.
+            tree_turn_user = text
+            tree_prior = len(ui.session.messages)
+            # The GPU is one card shared with image generation. After an
+            # image turn the model is merely unloaded (slow reload); after
+            # a swap the whole llm service is *down* and the turn would
+            # die on a bare connection-refused that says nothing about
+            # why. Restore the service first, saying so as it happens --
+            # the busy dots keep animating through the swap.
+            try:
+                with urllib.request.urlopen(
+                        swap_api + "/state", timeout=2) as r:
+                    swap_state = json.loads(r.read())
+            except Exception:  # noqa: BLE001 - no supervisor, no swap
+                swap_state = None
+            async with TURN_LOCK:
+                if swap_state and not swap_state.get("llm", True):
+                    await send_pub({"kind": "busy", "on": True})
+                    await send_pub({
+                        "kind": "notice",
+                        "text": "the llm service is down — the GPU was "
+                                "swapped to image generation; swapping "
+                                "back (this can take a minute)..."})
+                    try:
+                        request = urllib.request.Request(
+                            swap_api + "/swap/llm", data=b"{}",
+                            headers={
+                                "Content-Type": "application/json"})
+                        with urllib.request.urlopen(
+                                request, timeout=140) as r:
+                            json.loads(r.read())
+                        await send_pub({
+                            "kind": "notice",
+                            "text": "the llm service is back"})
+                    except Exception as exc:  # noqa: BLE001
+                        await send_pub({
+                            "kind": "notice",
+                            "text": f"could not restore the llm "
+                                    f"service: {exc}"})
+                    await send_pub({"kind": "busy", "on": False})
+            # A swapped-away model reloads its weights on this turn:
+            # 10-40 s for the 8B, ~130 s for the 14B, and until the
+            # first token there is no frame at all. Say so before the
+            # silence, or the turn reads as hung.
+            try:
+                rows = client.model_details()
+            except Exception:  # noqa: BLE001 - a probe must not kill the turn
+                rows = []
+            for row in rows:
+                if (str(row.get("id")) == ui.session.config.model
+                        and str(row.get("state", "")).lower()
+                        == "unloaded"):
+                    await send_pub({
+                        "kind": "notice",
+                        "text": f"loading {ui.session.config.model} "
+                                "(weights were swapped off the "
+                                "card; this can take a minute)"})
+                    break
+            await loop.run_in_executor(None, ui.ask, text)
+            # Tree bookkeeping: the engine appended the user message
+            # AND its response to session.messages; the node's own
+            # `user` text is tree_turn_user, so the node's content
+            # is ONLY what followed the user row (dropping the
+            # duplicate user entry messages_for would re-add).
+            tree_msgs = ui.session.messages[tree_prior:]
+            resp_only = tree_msgs[1:] if (
+                tree_msgs and tree_msgs[0].get("role") == "user"
+                and str(tree_msgs[0].get("content", "")) == tree_turn_user
+            ) else tree_msgs
+            nid = TREE.append_turn(tree_turn_user, list(resp_only))
+            await send_pub({"kind": "tree", **TREE.describe(),
+                            "new_node": nid})
+            # Autosave after every completed turn: "restore last
+            # session" must mean the conversation as it stands, not
+            # as it stood when the operator last remembered to save.
+            try:
+                sessions.save(SessionManager.AUTOSAVE)
+            except Exception:  # noqa: BLE001 - persistence is best-effort
+                pass
+
+        async def dispatch_turn(text: str) -> None:
+            """Wrap a slash command or a plain turn as a task, holding the
+            TURN_LOCK only for the actual work (the lock is held while the
+            engine streams, so two tasks cannot interleave)."""
+            nonlocal_history_note = None  # placeholder to keep locals minimal
+            if text.startswith("/"):
+                await send_pub({"kind": "you", "text": text})
+                if text in ("/exit", "/quit", "/q"):
+                    await send_pub(
+                        {"kind": "notice", "text": "the web session "
+                         "stays; just close the tab"})
+                    await send_pub({"kind": "turn_end"})
+                    return
+                async with TURN_LOCK:
+                    handled = await loop.run_in_executor(
+                        None, ui.dispatch, text)
+                    if not handled:
+                        await send_pub(
+                            {"kind": "raw", "text": text})
+                    if text.split()[0].lower() in ("/clear",):
+                        # The shared session was reset server-side;
+                        # EVERY tab's transcript must follow, and the
+                        # frame log IS the new (empty) transcript.
+                        HISTORY.clear()
+                        await send_pub({"kind": "clear"})
+                    await send_pub({"kind": "turn_end"})
+                # Slash commands can change the live session (/clear,
+                # /session load, /model): keep the autosave slot in
+                # sync, or a reconnect restores a stale conversation.
+                try:
+                    sessions.save(SessionManager.AUTOSAVE)
+                except Exception:  # noqa: BLE001 - persistence is best-effort
+                    pass
+                return
+            await send_pub({"kind": "you", "text": text})
+            await run_turn(text)
+
+        async def run_image_op(img: dict[str, Any]) -> None:
+            """One image generation (the dialog / typed op) as its own
+            task: the receive loop stays live, so a Cancel click from
+            the same tab mid-generation is actually heard. Body is the
+            old inline block; the op-level branch exits are returns
+            now, and per-socket validation notices still go to the
+            requesting tab."""
+            # The image dialog's structured request. Two paths:
+            # the plain one (no mode) keeps using the model-facing
+            # generate_image tool; the advanced one (mode set)
+            # calls imagegen.gen_advanced directly -- img2img,
+            # inpaint, sampler/scheduler/rng/cfg/batch are
+            # operator-only surface the tool schema never had.
+            mode = str(img.get("mode") or "")
+            model = str(img.get("model") or "pony").strip().lower()
+            if model not in ("pony", "qwen", "chroma"):
+                model = "pony"
+            prompt = str(img.get("prompt") or "").strip()
+            if not prompt:
+                await websocket.send_json({
+                    "kind": "notice",
+                    "text": "image generation needs a prompt"})
+                return
+            if mode:
+                if GEN["active"] is not None:
+                    await websocket.send_json({
+                        "kind": "notice",
+                        "text": "a generation is already "
+                                "running; it will stream here"})
+                    return
+                # Every knob minus the bulky b64 payloads (a
+                # retry re-uploads from the dialog state the
+                # page still holds).
+                req_echo = {k: v for k, v in img.items()
+                            if k not in ("init_image_b64",
+                                         "mask_b64")}
+                my_run = {"frames": [], "request": req_echo,
+                          "ended": 0.0}
+                GEN["active"] = my_run
+                # The user's own row echoes the request whole.
+                await bcast_pub({
+                    "kind": "you",
+                    "text": f"/image {mode} {model} {prompt}"})
+                # An image turn is still a turn: the assistant
+                # row anchors the busy dots, and an immediate
+                # indeterminate bar says "generating" through
+                # the minutes of swap + weight load before any
+                # sampling step exists to report.
+                await bcast_pub({"kind": "assistant"})
+                await bcast_pub({"kind": "busy", "on": True})
+                await bcast_pub({
+                    "kind": "gen_progress",
+                    "phase": "generating image — preparing "
+                             "(swap / weight load)",
+                    "step": 0, "total": 0})
+                out_dir = Path(
+                    str(ui.session.workspace.root)) / "images"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                stamp = int(time.time())
+                out_name = f"{model}-{stamp}"
+                init_path = mask_path = None
+                temp_paths: list[Path] = []
+                if img.get("init_image_b64"):
+                    raw = str(img["init_image_b64"])
+                    if raw.startswith("data:"):
+                        raw = raw.split(",", 1)[1]
+                    init_path = out_dir / f"init-{stamp}.png"
+                    init_path.write_bytes(
+                        base64.b64decode(raw))
+                    temp_paths.append(init_path)
+                if img.get("mask_b64"):
+                    raw = str(img["mask_b64"])
+                    if raw.startswith("data:"):
+                        raw = raw.split(",", 1)[1]
+                    mask_path = out_dir / f"mask-{stamp}.png"
+                    mask_path.write_bytes(
+                        base64.b64decode(raw))
+                    temp_paths.append(mask_path)
+
+                def run_advanced(
+                        img=img, model=model, prompt=prompt,
+                        out_dir=out_dir, stamp=stamp,
+                        init_path=init_path, mask_path=mask_path):
+                    import importlib.util as _ilu
+                    spec = _ilu.spec_from_file_location(
+                        "imagegen",
+                        REPO / "tools" / "imagegen.py")
+                    if spec is None or spec.loader is None:
+                        raise RuntimeError(
+                            "imagegen.py could not be loaded")
+                    mod = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    return mod.gen_advanced(
+                        model=model, prompt=prompt,
+                        out=str(out_dir /
+                                f"{model}-{stamp}.png"),
+                        negative_prompt=str(
+                            img.get("negative_prompt") or ""),
+                        width=int(img.get("width") or 0),
+                        height=int(img.get("height") or 0),
+                        steps=int(img.get("steps") or 0),
+                        seed=int(img.get("seed") or -1),
+                        sampler=str(
+                            img.get("sampler") or ""),
+                        scheduler=str(
+                            img.get("scheduler") or ""),
+                        rng=str(img.get("rng") or ""),
+                        cfg=float(img.get("cfg") or 0),
+                        eta=(None if img.get("eta") is None
+                             else float(img["eta"])),
+                        batch_count=int(
+                            img.get("batch_count") or 1),
+                        init_image=(str(init_path)
+                                    if init_path else None),
+                        mask_image=(str(mask_path)
+                                    if mask_path else None),
+                        denoise_strength=(
+                            None
+                            if img.get("denoise_strength") is None
+                            else float(
+                                img["denoise_strength"])),
+                        mask_invert=bool(
+                            img.get("mask_invert") or False),
+                    )
+
+                # gen_advanced runs in-process, so its stderr
+                # markers land on OUR console, not in a pipe the
+                # harness reads -- poll the supervisor for
+                # progress directly and stream frames while the
+                # executor works.
+                async def poll_progress() -> None:
+                    last = None
+                    last_phase = None
+                    last_change = time.time()
+                    seen_steps = False
+                    while True:
+                        await asyncio.sleep(2)
+                        try:
+                            with urllib.request.urlopen(
+                                    swap_api + "/progress",
+                                    timeout=2) as r:
+                                progress = json.loads(
+                                    r.read()).get("progress")
+                        except Exception:  # noqa: BLE001
+                            progress = None
+                        phase = None
+                        if progress:
+                            seen_steps = True
+                            if progress != last:
+                                last = progress
+                                last_change = time.time()
+                                await bcast_pub({
+                                    "kind": "gen_progress",
+                                    "phase": "sampling",
+                                    "step": progress["step"],
+                                    "total":
+                                        progress["total"]})
+                            if time.time() - last_change > 45:
+                                # steps stalled: VAE decode
+                                phase = ("finalizing "
+                                         "(VAE decode / save)")
+                        elif seen_steps:
+                            phase = ("finalizing "
+                                     "(VAE decode / save)")
+                        else:
+                            phase = ("generating image — "
+                                     "preparing (swap / weight "
+                                     "load)")
+                        if phase and phase != last_phase:
+                            last_phase = phase
+                            await bcast_pub({
+                                "kind": "gen_progress",
+                                "phase": phase,
+                                "step": 0, "total": 0})
+                progress_task = asyncio.ensure_future(
+                    poll_progress())
+                ok = False
+                try:
+                    ok = await loop.run_in_executor(
+                        None, run_advanced)
+                except Exception as exc:  # noqa: BLE001
+                    await bcast_pub({
+                        "kind": "error",
+                        "text": f"image generation failed: "
+                                f"{exc}"})
+                finally:
+                    progress_task.cancel()
+                    for temp in temp_paths:
+                        try:
+                            temp.unlink()
+                        except OSError:
+                            pass
+                    # A cancelled run was closed by do_cancel (registry
+                    # cleared, terminal frames sent): the executor's
+                    # late error/no-image frames would paint "generation
+                    # failed" AFTER the operator already saw the cancel
+                    # land. Ownership check: while the run is ours it is
+                    # GEN["active"]; do_cancel retires it to GEN["last"].
+                    # If it is no longer active, we no longer own the
+                    # close -- bail without sending anything.
+                    if GEN["active"] is not my_run:
+                        return
+                    # Build the result frames NOW (the executor
+                    # has finished or died; files are on disk).
+                    after: list[dict[str, Any]] = []
+                    if ok:
+                        saved = sorted(out_dir.glob(
+                            f"{model}-{stamp}*.png"))
+                        for path in saved:
+                            # Sidecar: the prompt and every knob,
+                            # durable next to the image. The
+                            # disk-replay reads it so copy means
+                            # the prompt and retry works -- long
+                            # after this run's frames are gone.
+                            try:
+                                path.with_suffix(
+                                    ".prompt").write_text(
+                                    json.dumps(req_echo,
+                                               indent=2))
+                            except OSError:
+                                pass
+                            after.append({
+                                "kind": "image",
+                                "path": f"images/{path.name}",
+                                "request": req_echo})
+                        after.append({
+                            "kind": "raw",
+                            "text": (f"image saved to images/"
+                                     f"{out_name}.png"
+                                     + (f" (+{len(saved) - 1} "
+                                        f"more)"
+                                        if len(saved) > 1
+                                        else ""))})
+                    else:
+                        after.append({
+                            "kind": "error",
+                            "text": "image generation failed; "
+                                    "see the server log"})
+                    # Cancellation-proof close, all SYNCHRONOUS:
+                    # result frames into the replay log, then the
+                    # terminal frames, then retirement. No await
+                    # between them, so a CancelledError (client
+                    # died at the wrong moment) can never wedge
+                    # GEN["active"] nor ship a half-run.
+                    run_rec = my_run
+                    for frame in after:
+                        log_frame(run_rec, frame)
+                    retire_run()
+                    # Network copies only after the record is
+                    # complete and closed -- best-effort.
+                    try:
+                        for frame in after:
+                            await send_pub(frame)
+                        await send_pub({"kind": "turn_end"})
+                        await send_pub({"kind": "busy", "on": False})
+                    except Exception:  # noqa: BLE001
+                        pass
+                return
+
+            # plain path: the tool, unchanged
+            args: dict[str, Any] = {"prompt": prompt, "model": model}
+            negative = str(img.get("negative_prompt") or "").strip()
+            if negative:
+                args["negative_prompt"] = negative
+            size = str(img.get("size") or "").strip()
+            if size:
+                args["size"] = size
+            try:
+                steps = int(img.get("steps") or 0)
+            except (TypeError, ValueError):
+                steps = 0
+            if steps > 0:
+                args["steps"] = steps
+            try:
+                seed = int(img.get("seed") or 0)
+            except (TypeError, ValueError):
+                seed = 0
+            if seed:
+                args["seed"] = seed
+            # Plain path (typed /image with no mode knob): the
+            # SAME run lifecycle as the dialog path -- the run
+            # outlives this socket, frames broadcast to every
+            # tab, and retirement is cancellation-proof.
+            if GEN["active"] is not None:
+                await websocket.send_json({
+                    "kind": "notice",
+                    "text": "a generation is already "
+                            "running; it will stream here"})
+                return
+            req_echo_plain = dict(args)
+            my_run = {"frames": [],
+                      "request": req_echo_plain,
+                      "ended": 0.0}
+            GEN["active"] = my_run
+            # This WebChat's own renders (the tool's notices,
+            # gen_progress, show_image) ARE the run's frames:
+            # attach the replay log before the first echo, and
+            # relay them to peer tabs live.
+            ui.set_gen_log(my_run["frames"])
+            ui.set_relay(send_pub)
+            await bcast_pub({
+                "kind": "you",
+                "text": f"/image {model} {prompt}"})
+            await bcast_pub({"kind": "busy", "on": True})
+            await bcast_pub({
+                "kind": "gen_progress",
+                "phase": "generating image — preparing "
+                         "(swap / weight load)",
+                "step": 0, "total": 0})
+
+            def run_image(args=args):
+                return ui.session.workspace.call(
+                    "generate_image", args)
+
+            result = None
+            try:
+                result = await loop.run_in_executor(
+                    None, run_image)
+            except Exception as exc:  # noqa: BLE001
+                await bcast_pub({
+                    "kind": "error",
+                    "text": f"image generation failed: {exc}"})
+            finally:
+                ui.set_gen_log(None)
+                ui.set_relay(None)
+                # Result frames exist; log them SYNC, then retire,
+                # then network-send. Same ordering contract as
+                # the dialog path.
+                after: list[dict[str, Any]] = []
+                if result is not None and result.ok:
+                    after.append({
+                        "kind": "raw", "text": result.text})
+                    # Sidecar for the disk-replay: the prompt and
+                    # knobs, durable next to the newest image this
+                    # run wrote (the raw text names it, but the
+                    # file is easier to find by mtime).
+                    try:
+                        newest = max(
+                            (chat_config.root / "images")
+                            .glob("*.png"),
+                            key=lambda p: p.stat().st_mtime)
+                        newest.with_suffix(".prompt").write_text(
+                            json.dumps(req_echo_plain, indent=2))
+                    except (OSError, ValueError):
+                        pass
+                elif result is not None:
+                    after.append({
+                        "kind": "error", "text": result.text})
+                if GEN["active"] is not my_run:
+                    # Cancelled mid-flight: do_cancel already closed
+                    # this run (terminal frames logged and sent, registry
+                    # retired). The tool result's late error text must
+                    # not overwrite the cancel the operator saw.
+                    return
+                run_rec = GEN["active"]
+                for frame in after:
+                    log_frame(run_rec, frame)
+                retire_run()
+                try:
+                    for frame in after:
+                        await send_pub(frame)
+                    await send_pub({"kind": "turn_end"})
+                    await send_pub({"kind": "busy", "on": False})
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
         try:
             while True:
                 message = await websocket.receive_json()
@@ -2749,348 +3350,17 @@ def main() -> int:
 
                 img = message.get("image")
                 if isinstance(img, dict):
-                    # The image dialog's structured request. Two paths:
-                    # the plain one (no mode) keeps using the model-facing
-                    # generate_image tool; the advanced one (mode set)
-                    # calls imagegen.gen_advanced directly -- img2img,
-                    # inpaint, sampler/scheduler/rng/cfg/batch are
-                    # operator-only surface the tool schema never had.
-                    mode = str(img.get("mode") or "")
-                    model = str(img.get("model") or "pony").strip().lower()
-                    if model not in ("pony", "qwen", "chroma"):
-                        model = "pony"
-                    prompt = str(img.get("prompt") or "").strip()
-                    if not prompt:
-                        await websocket.send_json({
-                            "kind": "notice",
-                            "text": "image generation needs a prompt"})
-                        continue
-                    if mode:
-                        if GEN["active"] is not None:
-                            await websocket.send_json({
-                                "kind": "notice",
-                                "text": "a generation is already "
-                                        "running; it will stream here"})
-                            continue
-                        # Every knob minus the bulky b64 payloads (a
-                        # retry re-uploads from the dialog state the
-                        # page still holds).
-                        req_echo = {k: v for k, v in img.items()
-                                    if k not in ("init_image_b64",
-                                                 "mask_b64")}
-                        GEN["active"] = {
-                            "frames": [], "request": req_echo,
-                            "ended": 0.0}
-                        # The user's own row echoes the request whole.
-                        await bcast_pub({
-                            "kind": "you",
-                            "text": f"/image {mode} {model} {prompt}"})
-                        # An image turn is still a turn: the assistant
-                        # row anchors the busy dots, and an immediate
-                        # indeterminate bar says "generating" through
-                        # the minutes of swap + weight load before any
-                        # sampling step exists to report.
-                        await bcast_pub({"kind": "assistant"})
-                        await bcast_pub({"kind": "busy", "on": True})
-                        await bcast_pub({
-                            "kind": "gen_progress",
-                            "phase": "generating image — preparing "
-                                     "(swap / weight load)",
-                            "step": 0, "total": 0})
-                        out_dir = Path(
-                            str(ui.session.workspace.root)) / "images"
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        stamp = int(time.time())
-                        out_name = f"{model}-{stamp}"
-                        init_path = mask_path = None
-                        temp_paths: list[Path] = []
-                        if img.get("init_image_b64"):
-                            raw = str(img["init_image_b64"])
-                            if raw.startswith("data:"):
-                                raw = raw.split(",", 1)[1]
-                            init_path = out_dir / f"init-{stamp}.png"
-                            init_path.write_bytes(
-                                base64.b64decode(raw))
-                            temp_paths.append(init_path)
-                        if img.get("mask_b64"):
-                            raw = str(img["mask_b64"])
-                            if raw.startswith("data:"):
-                                raw = raw.split(",", 1)[1]
-                            mask_path = out_dir / f"mask-{stamp}.png"
-                            mask_path.write_bytes(
-                                base64.b64decode(raw))
-                            temp_paths.append(mask_path)
-
-                        def run_advanced(
-                                img=img, model=model, prompt=prompt,
-                                out_dir=out_dir, stamp=stamp,
-                                init_path=init_path, mask_path=mask_path):
-                            import importlib.util as _ilu
-                            spec = _ilu.spec_from_file_location(
-                                "imagegen",
-                                REPO / "tools" / "imagegen.py")
-                            if spec is None or spec.loader is None:
-                                raise RuntimeError(
-                                    "imagegen.py could not be loaded")
-                            mod = _ilu.module_from_spec(spec)
-                            spec.loader.exec_module(mod)
-                            return mod.gen_advanced(
-                                model=model, prompt=prompt,
-                                out=str(out_dir /
-                                        f"{model}-{stamp}.png"),
-                                negative_prompt=str(
-                                    img.get("negative_prompt") or ""),
-                                width=int(img.get("width") or 0),
-                                height=int(img.get("height") or 0),
-                                steps=int(img.get("steps") or 0),
-                                seed=int(img.get("seed") or -1),
-                                sampler=str(
-                                    img.get("sampler") or ""),
-                                scheduler=str(
-                                    img.get("scheduler") or ""),
-                                rng=str(img.get("rng") or ""),
-                                cfg=float(img.get("cfg") or 0),
-                                eta=(None if img.get("eta") is None
-                                     else float(img["eta"])),
-                                batch_count=int(
-                                    img.get("batch_count") or 1),
-                                init_image=(str(init_path)
-                                            if init_path else None),
-                                mask_image=(str(mask_path)
-                                            if mask_path else None),
-                                denoise_strength=(
-                                    None
-                                    if img.get("denoise_strength") is None
-                                    else float(
-                                        img["denoise_strength"])),
-                                mask_invert=bool(
-                                    img.get("mask_invert") or False),
-                            )
-
-                        # gen_advanced runs in-process, so its stderr
-                        # markers land on OUR console, not in a pipe the
-                        # harness reads -- poll the supervisor for
-                        # progress directly and stream frames while the
-                        # executor works.
-                        async def poll_progress() -> None:
-                            last = None
-                            last_phase = None
-                            last_change = time.time()
-                            seen_steps = False
-                            while True:
-                                await asyncio.sleep(2)
-                                try:
-                                    with urllib.request.urlopen(
-                                            swap_api + "/progress",
-                                            timeout=2) as r:
-                                        progress = json.loads(
-                                            r.read()).get("progress")
-                                except Exception:  # noqa: BLE001
-                                    progress = None
-                                phase = None
-                                if progress:
-                                    seen_steps = True
-                                    if progress != last:
-                                        last = progress
-                                        last_change = time.time()
-                                        await bcast_pub({
-                                            "kind": "gen_progress",
-                                            "phase": "sampling",
-                                            "step": progress["step"],
-                                            "total":
-                                                progress["total"]})
-                                    if time.time() - last_change > 45:
-                                        # steps stalled: VAE decode
-                                        phase = ("finalizing "
-                                                 "(VAE decode / save)")
-                                elif seen_steps:
-                                    phase = ("finalizing "
-                                             "(VAE decode / save)")
-                                else:
-                                    phase = ("generating image — "
-                                             "preparing (swap / weight "
-                                             "load)")
-                                if phase and phase != last_phase:
-                                    last_phase = phase
-                                    await bcast_pub({
-                                        "kind": "gen_progress",
-                                        "phase": phase,
-                                        "step": 0, "total": 0})
-                        progress_task = asyncio.ensure_future(
-                            poll_progress())
-                        ok = False
-                        try:
-                            ok = await loop.run_in_executor(
-                                None, run_advanced)
-                        except Exception as exc:  # noqa: BLE001
-                            await bcast_pub({
-                                "kind": "error",
-                                "text": f"image generation failed: "
-                                        f"{exc}"})
-                        finally:
-                            progress_task.cancel()
-                            for temp in temp_paths:
-                                try:
-                                    temp.unlink()
-                                except OSError:
-                                    pass
-                            # Build the result frames NOW (the executor
-                            # has finished or died; files are on disk).
-                            after: list[dict[str, Any]] = []
-                            if ok:
-                                saved = sorted(out_dir.glob(
-                                    f"{model}-{stamp}*.png"))
-                                for path in saved:
-                                    # Sidecar: the prompt and every knob,
-                                    # durable next to the image. The
-                                    # disk-replay reads it so copy means
-                                    # the prompt and retry works -- long
-                                    # after this run's frames are gone.
-                                    try:
-                                        path.with_suffix(
-                                            ".prompt").write_text(
-                                            json.dumps(req_echo,
-                                                       indent=2))
-                                    except OSError:
-                                        pass
-                                    after.append({
-                                        "kind": "image",
-                                        "path": f"images/{path.name}",
-                                        "request": req_echo})
-                                after.append({
-                                    "kind": "raw",
-                                    "text": (f"image saved to images/"
-                                             f"{out_name}.png"
-                                             + (f" (+{len(saved) - 1} "
-                                                f"more)"
-                                                if len(saved) > 1
-                                                else ""))})
-                            else:
-                                after.append({
-                                    "kind": "error",
-                                    "text": "image generation failed; "
-                                            "see the server log"})
-                            # Cancellation-proof close, all SYNCHRONOUS:
-                            # result frames into the replay log, then the
-                            # terminal frames, then retirement. No await
-                            # between them, so a CancelledError (client
-                            # died at the wrong moment) can never wedge
-                            # GEN["active"] nor ship a half-run.
-                            run_rec = GEN["active"]
-                            for frame in after:
-                                log_frame(run_rec, frame)
-                            retire_run()
-                            # Network copies only after the record is
-                            # complete and closed -- best-effort.
-                            try:
-                                for frame in after:
-                                    await send_pub(frame)
-                                await send_pub({"kind": "turn_end"})
-                                await send_pub({"kind": "busy", "on": False})
-                            except Exception:  # noqa: BLE001
-                                pass
-                        continue
-
-                    # plain path: the tool, unchanged
-                    args: dict[str, Any] = {"prompt": prompt, "model": model}
-                    negative = str(img.get("negative_prompt") or "").strip()
-                    if negative:
-                        args["negative_prompt"] = negative
-                    size = str(img.get("size") or "").strip()
-                    if size:
-                        args["size"] = size
-                    try:
-                        steps = int(img.get("steps") or 0)
-                    except (TypeError, ValueError):
-                        steps = 0
-                    if steps > 0:
-                        args["steps"] = steps
-                    try:
-                        seed = int(img.get("seed") or 0)
-                    except (TypeError, ValueError):
-                        seed = 0
-                    if seed:
-                        args["seed"] = seed
-                    # Plain path (typed /image with no mode knob): the
-                    # SAME run lifecycle as the dialog path -- the run
-                    # outlives this socket, frames broadcast to every
-                    # tab, and retirement is cancellation-proof.
-                    if GEN["active"] is not None:
-                        await websocket.send_json({
-                            "kind": "notice",
-                            "text": "a generation is already "
-                                    "running; it will stream here"})
-                        continue
-                    req_echo_plain = dict(args)
-                    GEN["active"] = {"frames": [],
-                                     "request": req_echo_plain,
-                                     "ended": 0.0}
-                    # This WebChat's own renders (the tool's notices,
-                    # gen_progress, show_image) ARE the run's frames:
-                    # attach the replay log before the first echo, and
-                    # relay them to peer tabs live.
-                    ui.set_gen_log(GEN["active"]["frames"])
-                    ui.set_relay(send_pub)
-                    await bcast_pub({
-                        "kind": "you",
-                        "text": f"/image {model} {prompt}"})
-                    await bcast_pub({"kind": "busy", "on": True})
-                    await bcast_pub({
-                        "kind": "gen_progress",
-                        "phase": "generating image — preparing "
-                                 "(swap / weight load)",
-                        "step": 0, "total": 0})
-
-                    def run_image(args=args):
-                        return ui.session.workspace.call(
-                            "generate_image", args)
-
-                    result = None
-                    try:
-                        result = await loop.run_in_executor(
-                            None, run_image)
-                    except Exception as exc:  # noqa: BLE001
-                        await bcast_pub({
-                            "kind": "error",
-                            "text": f"image generation failed: {exc}"})
-                    finally:
-                        ui.set_gen_log(None)
-                        ui.set_relay(None)
-                        # Result frames exist; log them SYNC, then retire,
-                        # then network-send. Same ordering contract as
-                        # the dialog path.
-                        after: list[dict[str, Any]] = []
-                        if result is not None and result.ok:
-                            after.append({
-                                "kind": "raw", "text": result.text})
-                            # Sidecar for the disk-replay: the prompt and
-                            # knobs, durable next to the newest image this
-                            # run wrote (the raw text names it, but the
-                            # file is easier to find by mtime).
-                            try:
-                                newest = max(
-                                    (chat_config.root / "images")
-                                    .glob("*.png"),
-                                    key=lambda p: p.stat().st_mtime)
-                                newest.with_suffix(".prompt").write_text(
-                                    json.dumps(req_echo_plain, indent=2))
-                            except (OSError, ValueError):
-                                pass
-                        elif result is not None:
-                            after.append({
-                                "kind": "error", "text": result.text})
-                        run_rec = GEN["active"]
-                        for frame in after:
-                            log_frame(run_rec, frame)
-                        retire_run()
-                        try:
-                            for frame in after:
-                                await send_pub(frame)
-                            await send_pub({"kind": "turn_end"})
-                            await send_pub({"kind": "busy", "on": False})
-                        except Exception:  # noqa: BLE001
-                            pass
+                    # The op runs as a TASK, not inline: the receive
+                    # loop stays live so Cancel is hearable mid-run
+                    # (same reason text turns became tasks).
+                    task = asyncio.ensure_future(run_image_op(img))
+                    current_task["task"] = task
+                    def _retire_img(t, h=current_task):
+                        if h["task"] is t:
+                            h["task"] = None
+                    task.add_done_callback(_retire_img)
                     continue
+
                 img_del = message.get("image_delete")
                 if isinstance(img_del, str) and img_del.strip():
                     # Images are workspace files the operator owns; the
@@ -3249,125 +3519,49 @@ def main() -> int:
                     await websocket.send_json({"kind": "tree",
                                                 **TREE.describe()})
                     continue
+                # Cancel is checked BEFORE the empty-text guard on purpose:
+                # it carries no text field (the panel-button rule -- an
+                # op dispatched after `if not text: continue` is silently
+                # swallowed, exactly the class that killed every panel
+                # button when sessions shipped).
+                if message.get("cancel") is True:
+                    if current_task["task"] is not None and \
+                            not current_task["task"].done():
+                        await do_cancel(websocket)
+                        continue
+                    await websocket.send_json({
+                        "kind": "notice",
+                        "text": "nothing is running"})
+                    continue
                 text = str(message.get("text", "")).strip()
                 if not text:
                     continue
-                if text.startswith("/"):
-                    # Echo the command as the user's row: a slash command
-                    # is still a thing the operator typed, and without the
-                    # row the whole turn (bar, result, image) renders in an
-                    # unlabeled block -- or, before the page grew
-                    # ensureTurn, crashed the handler on a null turn.
-                    await send_pub({"kind": "you", "text": text})
-                    if text in ("/exit", "/quit", "/q"):
-                        await send_pub(
-                            {"kind": "notice", "text": "the web session "
-                             "stays; just close the tab"})
-                        await send_pub({"kind": "turn_end"})
-                        continue
-                    async with TURN_LOCK:
-                        handled = await loop.run_in_executor(
-                            None, ui.dispatch, text)
-                        if not handled:
-                            await send_pub(
-                                {"kind": "raw", "text": text})
-                        if text.split()[0].lower() in ("/clear",):
-                            # The shared session was reset server-side;
-                            # EVERY tab's transcript must follow, and the
-                            # frame log IS the new (empty) transcript.
-                            HISTORY.clear()
-                            await send_pub({"kind": "clear"})
-                        await send_pub({"kind": "turn_end"})
-                    # Slash commands can change the live session (/clear,
-                    # /session load, /model): keep the autosave slot in
-                    # sync, or a reconnect restores a stale conversation.
-                    try:
-                        sessions.save(SessionManager.AUTOSAVE)
-                    except Exception:  # noqa: BLE001 - persistence is best-effort
-                        pass
-                    continue
-                await send_pub({"kind": "you", "text": text})
-                # -- tree bookkeeping: the turn runs against the ACTIVE
-                # chain; record the node when the turn completes.
-                tree_turn_user = text
-                tree_prior = len(ui.session.messages)
-                # The GPU is one card shared with image generation. After an
-                # image turn the model is merely unloaded (slow reload); after
-                # a swap the whole llm service is *down* and the turn would
-                # die on a bare connection-refused that says nothing about
-                # why. Restore the service first, saying so as it happens --
-                # the busy dots keep animating through the swap.
-                try:
-                    with urllib.request.urlopen(
-                            swap_api + "/state", timeout=2) as r:
-                        swap_state = json.loads(r.read())
-                except Exception:  # noqa: BLE001 - no supervisor, no swap
-                    swap_state = None
-                async with TURN_LOCK:
-                    if swap_state and not swap_state.get("llm", True):
-                        await send_pub({"kind": "busy", "on": True})
-                        await send_pub({
-                            "kind": "notice",
-                            "text": "the llm service is down — the GPU was "
-                                    "swapped to image generation; swapping "
-                                    "back (this can take a minute)..."})
-                        try:
-                            request = urllib.request.Request(
-                                swap_api + "/swap/llm", data=b"{}",
-                                headers={
-                                    "Content-Type": "application/json"})
-                            with urllib.request.urlopen(
-                                    request, timeout=140) as r:
-                                json.loads(r.read())
-                            await send_pub({
-                                "kind": "notice",
-                                "text": "the llm service is back"})
-                        except Exception as exc:  # noqa: BLE001
-                            await send_pub({
-                                "kind": "notice",
-                                "text": f"could not restore the llm "
-                                        f"service: {exc}"})
-                        await send_pub({"kind": "busy", "on": False})
-                # A swapped-away model reloads its weights on this turn:
-                # 10-40 s for the 8B, ~130 s for the 14B, and until the
-                # first token there is no frame at all. Say so before the
-                # silence, or the turn reads as hung.
-                try:
-                    rows = client.model_details()
-                except Exception:  # noqa: BLE001 - a probe must not kill the turn
-                    rows = []
-                for row in rows:
-                    if (str(row.get("id")) == ui.session.config.model
-                            and str(row.get("state", "")).lower()
-                            == "unloaded"):
-                        await send_pub({
-                            "kind": "notice",
-                            "text": f"loading {ui.session.config.model} "
-                                    "(weights were swapped off the "
-                                    "card; this can take a minute)"})
-                        break
-                await loop.run_in_executor(None, ui.ask, text)
-                # Tree bookkeeping: the engine appended the user message
-                # AND its response to session.messages; the node's own
-                # `user` text is tree_turn_user, so the node's content
-                # is ONLY what followed the user row (dropping the
-                # duplicate user entry messages_for would re-add).
-                tree_msgs = ui.session.messages[tree_prior:]
-                resp_only = tree_msgs[1:] if (
-                    tree_msgs and tree_msgs[0].get("role") == "user"
-                    and str(tree_msgs[0].get("content", "")) == tree_turn_user
-                ) else tree_msgs
-                nid = TREE.append_turn(tree_turn_user, list(resp_only))
-                await send_pub({"kind": "tree", **TREE.describe(),
-                                "new_node": nid})
-                # Autosave after every completed turn: "restore last
-                # session" must mean the conversation as it stands, not
-                # as it stood when the operator last remembered to save.
-                try:
-                    sessions.save(SessionManager.AUTOSAVE)
-                except Exception:  # noqa: BLE001 - persistence is best-effort
-                    pass
+                # A turn (or slash command) becomes a task: the receive
+                # loop stays live, so a Cancel click from this same tab
+                # can be heard mid-generation. Re-submits while a turn
+                # runs are refused with a notice (one engine turn at a
+                # time; TURN_LOCK serializes anyway, but the operator
+                # should hear why their message did not go).
+                begin = getattr(ui.session.client, "begin_turn", None)
+                if callable(begin):
+                    begin()
+                task = asyncio.ensure_future(dispatch_turn(text))
+                current_task["task"] = task
+                # Free the handle when the task ends so Cancel knows
+                # there is nothing left to stop (a done task's Cancel
+                # click answers "nothing is running" honestly).
+                def _retire(t, h=current_task):
+                    if h["task"] is t:
+                        h["task"] = None
+                task.add_done_callback(_retire)
         except WebSocketDisconnect:
+            pass
+        except RuntimeError:
+            # The ASGI state machine raises RuntimeError("WebSocket is
+            # not connected...") when the socket is already gone (the
+            # logged failure class from Android's tab freezer: the
+            # receive loop outlives the connection). Treat exactly like
+            # a disconnect -- the finally below drops the socket.
             pass
         finally:
             SOCKETS.discard(websocket)

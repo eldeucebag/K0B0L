@@ -33,6 +33,15 @@ The unit source ships in `tools/webui.service` (installed to
 - **Live generation progress**: a bar that is indeterminate through the
   swap + weight load ("preparing"), steps during sampling, "finalizing"
   through VAE decode, and a seconds clock from the moment you send.
+- **Cancel in place of send**: while any generation runs (text or
+  image), the send button becomes **cancel** — same spot, still
+  clickable, danger-tinted. A click stops the run: a text turn stops
+  at the next token (the partial reply stays on the page and in the
+  conversation), an image run is stopped at the sd-server (the GPU
+  is handed straight back to the llm service). When nothing runs, a
+  cancel click answers "nothing is running". Turns run as server-side
+  tasks, so the cancel is heard even from the tab that started the
+  generation.
 - **Sessions**: autosaved after every turn; a refresh restores the last
   conversation; the ≡ panel lists, loads, saves, and deletes named
   sessions.
@@ -66,21 +75,27 @@ size/steps/seed, and the full sampler surface — sampler, scheduler, RNG
 source, cfg, eta, batch. img2img and inpaint take an upload (click or
 drag); inpaint paints its mask on a canvas (brush size, clear, invert —
 white regenerates, black keeps). Behind the wheel is sd.cpp's A1111-shaped
-`/sdapi` route with an OpenAI-route fallback.
+sdapi route with an OpenAI-route fallback.
 
 ## Endpoints
 
 | route | what |
 | --- | --- |
 | `/` | the page (self-contained: no CDN, no external assets) |
-| `/ws` | the frame stream (chat, tools, progress, sessions, themes) |
-| `/image/{path}` | serves generated images from the workspace |
-| `/image-api/{path}` | same-origin proxy for the image server |
+| /ws | the frame stream (chat, tools, progress, sessions, themes) |
+| /image/{path} | serves generated images from the workspace |
+| /image-api/{path} | same-origin proxy for the image server |
 
 Frame kinds over the socket: `meta`, `you`, `assistant`, `delta`,
 `thinking`, `code`, `tool_call`, `tool_result`, `image`, `gen_progress`,
 `busy`, `raw`, `notice`, `error`, `turn_end`, `clear`,
 `restore_begin`/`restore_end`, `session_list`.
+
+Client messages: `{"text": "..."}` (a turn or slash command),
+`{"image": {...}}` (dialog/typed generation op), `{"cancel": true}`
+(stop whatever is running), plus the session/theme/tree/skills verbs.
+A turn is a server-side task — further messages (including cancel)
+are processed while it runs.
 
 ## Notes
 

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .client import OllamaClient, OllamaError
+from .client import OllamaClient, OllamaError, TurnCancelled
 from .config import ChatConfig
 from .tools import (
     TOOL_SCHEMAS,
@@ -563,40 +563,49 @@ class ChatSession:
             think=think,
             keep_alive=self.config.keep_alive,
         )
-        for chunk in stream:
-            # Both shapes normalize here: Ollama yields ``message`` dicts,
-            # OpenAI yields ``choices[0].delta``. Everything else in this
-            # method works on whatever the shape lands on.
-            if "choices" in chunk:
-                choice = chunk["choices"][0] if chunk["choices"] else {}
-                delta = choice.get("delta") or {}
-                message = {"content": delta.get("content", "") or "",
-                           "thinking": delta.get("reasoning_content") or delta.get("reasoning", "") or "",
-                           "tool_calls": delta.get("tool_calls") or []}
-                if choice.get("finish_reason"):
-                    chunk["done"] = True
-                    chunk["done_reason"] = choice["finish_reason"]
-            else:
-                message = chunk.get("message") or {}
-            if isinstance(message.get("thinking"), str) and message["thinking"]:
-                thinking.append(message["thinking"])
-                self.hooks.thinking(message["thinking"])
-            if isinstance(message.get("content"), str) and message["content"]:
-                content.append(message["content"])
-                self.hooks.delta(message["content"])
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                index = int(function.get("index", len(pending)))
-                slot = pending.setdefault(index, {"name": "", "arguments": {}})
-                if function.get("name"):
-                    slot["name"] = function["name"]
-                arguments = normalize_arguments(function.get("arguments"))
-                if arguments:
-                    slot["arguments"].update(arguments)
-            if chunk.get("done"):
-                stats.done_reason = str(chunk.get("done_reason") or "")
-                stats.prompt_tokens = int(chunk.get("prompt_eval_count") or 0)
-                stats.output_tokens = int(chunk.get("eval_count") or 0)
+        # Operator cancel: the webui Cancel button sets a flag on the
+        # client; the stream generator raises TurnCancelled at the next
+        # chunk boundary. What streamed so far is KEPT -- the page shows
+        # it and the history should hold the same partial answer -- so
+        # catch here and fall through with the pieces already received
+        # rather than unwinding the whole turn as an error.
+        try:
+            for chunk in stream:
+                # Both shapes normalize here: Ollama yields ``message`` dicts,
+                # OpenAI yields ``choices[0].delta``. Everything else in this
+                # method works on whatever the shape lands on.
+                if "choices" in chunk:
+                    choice = chunk["choices"][0] if chunk["choices"] else {}
+                    delta = choice.get("delta") or {}
+                    message = {"content": delta.get("content", "") or "",
+                               "thinking": delta.get("reasoning_content") or delta.get("reasoning", "") or "",
+                               "tool_calls": delta.get("tool_calls") or []}
+                    if choice.get("finish_reason"):
+                        chunk["done"] = True
+                        chunk["done_reason"] = choice["finish_reason"]
+                else:
+                    message = chunk.get("message") or {}
+                if isinstance(message.get("thinking"), str) and message["thinking"]:
+                    thinking.append(message["thinking"])
+                    self.hooks.thinking(message["thinking"])
+                if isinstance(message.get("content"), str) and message["content"]:
+                    content.append(message["content"])
+                    self.hooks.delta(message["content"])
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    index = int(function.get("index", len(pending)))
+                    slot = pending.setdefault(index, {"name": "", "arguments": {}})
+                    if function.get("name"):
+                        slot["name"] = function["name"]
+                    arguments = normalize_arguments(function.get("arguments"))
+                    if arguments:
+                        slot["arguments"].update(arguments)
+                if chunk.get("done"):
+                    stats.done_reason = str(chunk.get("done_reason") or "")
+                    stats.prompt_tokens = int(chunk.get("prompt_eval_count") or 0)
+                    stats.output_tokens = int(chunk.get("eval_count") or 0)
+        except TurnCancelled:
+            stats.done_reason = "cancelled"
 
         stats.seconds = time.monotonic() - started
         prose = "".join(content)
@@ -624,9 +633,11 @@ class ChatSession:
                     f"reply hit the output ceiling (num_predict={self.config.num_predict}); "
                     f"raise CHAT_NUM_PREDICT for longer answers"
                 )
-        elif not prose.strip() and not calls:
+        elif not prose.strip() and not calls and stats.done_reason != "cancelled":
             # Nothing visible and nothing asked for: say so, rather than let the
             # operator stare at a blank line wondering whether it is broken.
+            # A cancelled turn is deliberately quiet: the operator stopped it
+            # and knows why -- advice about thinking budgets would be noise.
             self.hooks.notice(
                 "the model produced no visible prose this round; the reasoning is "
                 "hidden -- set CHAT_THINK=0, or /think off, to see its work"
@@ -860,6 +871,13 @@ class ChatSession:
                 self.hooks.round_end(stats)
                 if prose:
                     final = prose
+                if stats.done_reason == "cancelled":
+                    # The operator stopped this turn: keep the partial reply
+                    # (already streamed to the page and appended above), do
+                    # NOT run tool calls it may have asked for, and end the
+                    # turn instead of generating another round.
+                    self.hooks.notice("generation cancelled")
+                    return final
                 if not calls:
                     self.turns += 1
                     self._explain_empty(final)

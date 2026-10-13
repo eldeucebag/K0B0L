@@ -26,6 +26,19 @@ class OllamaError(RuntimeError):
     """Ollama could not be reached, or answered with something unusable."""
 
 
+class TurnCancelled(Exception):
+    """The operator cancelled the in-flight turn (webui Cancel).
+
+    Raised by the streaming clients once per cancelled turn: the first
+    ``raise_for_cancel()`` flips a flag and the *next* stream-read
+    boundary aborts, so the generation request the server is still
+    computing is closed client-side without waiting for it to finish.
+    The engine treats this as an end-of-turn, not an error: the partial
+    prose already streamed stays, history is left consistent, and the
+    user message is kept (a cancelled answer beats a vanished question).
+    """
+
+
 def make_client(base_url: str, *, api_key: str = "", timeout: float = 3600.0):
     """Pick the client for an endpoint by its URL shape.
 
@@ -99,6 +112,23 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key
+        #: Operator cancel (the webui Cancel button). Read at every stream
+        #: chunk boundary; a set flag aborts the loop and the with-block
+        #: closes the HTTP connection, so the server keeps computing into
+        #: a closed socket instead of the client awaiting a finished answer.
+        self._cancelled = False
+
+    def begin_turn(self) -> None:
+        """Clear the cancel flag at the start of each turn."""
+        self._cancelled = False
+
+    def cancel_turn(self) -> None:
+        """Ask the in-flight stream (if any) to stop at the next chunk."""
+        self._cancelled = True
+
+    def _raise_for_cancel(self) -> None:
+        if self._cancelled:
+            raise TurnCancelled()
 
     def _call(self, endpoint: str, payload: dict[str, Any] | None) -> ApiResponse:
         url = f"{self.base_url}{endpoint}"
@@ -274,6 +304,7 @@ class OllamaClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
                 for raw in response:
+                    self._raise_for_cancel()
                     line = raw.decode("utf-8", "replace").strip()
                     if not line:
                         continue
@@ -304,6 +335,19 @@ class OpenAIClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key
+        self._cancelled = False
+
+    def begin_turn(self) -> None:
+        """Clear the cancel flag at the start of each turn."""
+        self._cancelled = False
+
+    def cancel_turn(self) -> None:
+        """Ask the in-flight stream (if any) to stop at the next chunk."""
+        self._cancelled = True
+
+    def _raise_for_cancel(self) -> None:
+        if self._cancelled:
+            raise TurnCancelled()
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -490,6 +534,7 @@ class OpenAIClient:
 
         with self._request("/chat/completions", payload, stream=True) as response:
             for raw in response:
+                self._raise_for_cancel()
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
                     continue
