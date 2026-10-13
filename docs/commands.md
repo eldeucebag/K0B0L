@@ -13,7 +13,10 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/docs [topic]` | List the product docs, or print one |
 | `/core` | Show the CORE.md this session loaded, and its path (alias: `/soul`) |
 | `/skills list\|enable\|disable <name>` | Manage skills: list, or pin/unpin one into every turn |
-| `/skills edit [name]` | Open the skills editor (see `docs/skills`); a name opens that skill directly |
+| `/skills show <name>` | Print a skill's body (and where it lives) |
+| `/skills new [name]` | Create a new skill from the template, under the workspace `skills/` dir |
+| `/skills edit <name>` | Print the raw SKILL.md (frontmatter + body) with its path; the Textual front end opens its modal editor instead (see `docs/skills`) |
+| `/skills delete <name>` | Delete a skill (click-to-confirm in the web panel; removes the file and unpins it) |
 | `/compact` | Compress the conversation into one summary and continue from it — durable facts are written to the memory store, and earlier memories are recalled into the compacted context |
 | `/image [model] <prompt>` | Generate an image locally (pony\|qwen\|chroma — see `docs/imagegen`); the model has the same `generate_image` tool |
 | `/session save\|load\|list <name>` | Persist or resume a conversation |

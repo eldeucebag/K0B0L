@@ -314,6 +314,19 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   color: var(--ink); font: 12.5px/1.5 var(--mono);
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.skill-edit-head { display: flex; gap: 8px; align-items: center;
+  margin-top: 10px; }
+.skill-edit-head .sk-name { flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#skill-body-edit {
+  width: 100%; box-sizing: border-box; margin-top: 8px;
+  background: var(--code-bg); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; resize: vertical;
+  font: 12.5px/1.5 var(--mono); white-space: pre; overflow-wrap: anywhere;
+}
+#skill-body-edit:focus { outline: none; border-color: var(--accent); }
+#skill-edit-status { margin-top: 6px; min-height: 1em; }
 .branch-switcher {
   display: flex; gap: 6px; align-items: center;
   min-width: 0; overflow-x: auto; scrollbar-width: thin;
@@ -668,6 +681,18 @@ dialog button.primary:hover { color: var(--accent-ink); }
   <details class="core-details">
     <summary>CORE.md (the identity this session speaks through)</summary>
     <pre id="core-text" class="core-text"></pre>
+  </details>
+  <details class="core-details">
+    <summary>skill editor (create / edit / delete)</summary>
+    <div class="skill-edit-head">
+      <span id="skill-edit-name" class="sk-name"></span>
+      <button id="skill-new" class="act">+ new</button>
+      <button id="skill-save" class="act">save</button>
+      <button id="skill-delete" class="act">delete</button>
+    </div>
+    <textarea id="skill-body-edit" rows="14" spellcheck="false"
+      placeholder="click a skill above to edit it, or + new. the raw SKILL.md: frontmatter (name, description, trigger keywords) then the procedure body."></textarea>
+    <div id="skill-edit-status" class="sk-desc"></div>
   </details>
   <div class="opt-actions">
     <button id="skills-close">close</button>
@@ -1273,6 +1298,38 @@ function wireSocket() {
     case "skills":
       renderSkills(m.skills || [], m.active || []);
       break;
+    case "skill_text":
+      // A skill's raw SKILL.md opened in the editor. An error still
+      // fills the editor (the panel stays usable for a re-save).
+      document.getElementById("skill-body-edit").value =
+        m.text || "";
+      document.getElementById("skill-edit-name").textContent =
+        m.name || "(new skill)";
+      skillEdit.name = m.name || "";
+      skillEdit.create = !!m.new;
+      skillStatus(m.error
+        ? m.error + " — the editor holds a starting template"
+        : "loaded " + (m.name || "") + " — edit and save", !!m.error);
+      break;
+    case "skill_saved":
+      if (m.ok) {
+        skillStatus((m.deleted ? "deleted " + m.deleted
+          : "saved " + (m.name || "")) + (m.path ? " — " + m.path : ""));
+        // refresh the list + keep the editor honest for a follow-up
+        setTimeout(() => ws.send(JSON.stringify({ skills_list: true })), 300);
+        if (m.deleted) {
+          document.getElementById("skill-body-edit").value = "";
+          document.getElementById("skill-edit-name").textContent = "";
+          skillEdit.name = "";
+          skillEdit.create = false;
+        } else if (m.name) {
+          skillEdit.name = m.name;
+          skillEdit.create = false;
+        }
+      } else {
+        skillStatus(m.error || "not saved", true);
+      }
+      break;
     case "core":
       document.getElementById("core-text").textContent =
         m.loaded ? (m.text || "(empty)") : "(no CORE.md loaded)";
@@ -1809,7 +1866,6 @@ function renderSkills(skills, active) {
     empty.className = "sess-empty";
     empty.textContent = "no skills discovered (workspace skills/ or ~/.k0b0l-skills)";
     list.appendChild(empty);
-    return;
   }
   for (const sk of skills) {
     const row = document.createElement("div");
@@ -1833,10 +1889,81 @@ function renderSkills(skills, active) {
       // shown is the server's, not the click's guess
       setTimeout(() => ws.send(JSON.stringify({ skills_list: true })), 400);
     });
+    // clicking the row opens the skill in the editor below
+    row.addEventListener("click", () => {
+      ws.send(JSON.stringify({ skills_read: sk.name }));
+      skillEdit.name = sk.name;
+      skillEdit.create = false;
+      document.getElementById("skill-edit-name").textContent = sk.name;
+      document.getElementById("skill-edit-status").textContent =
+        "loading " + sk.name + "...";
+    });
     row.appendChild(name); row.appendChild(desc); row.appendChild(btn);
     list.appendChild(row);
   }
 }
+
+// -- the skill editor (create / edit / delete skills in-panel) --------
+// NOTE: no backslash escapes anywhere in this block -- the PAGE is a
+// Python string, and a backslash-n inside these literals would be
+// consumed by Python at page-build time, leaving a raw newline in the
+// JS: a SyntaxError that kills every handler on the page (the
+// historical "prompts vanish" failure). Newlines come from charCode 10.
+const skillEdit = { name: "", create: false };
+const NL = String.fromCharCode(10);
+const SKILL_TEMPLATE = ["---",
+  "name: my-skill",
+  "description: One line saying when this skill applies.",
+  "trigger:",
+  "  keywords: []",
+  "requires: []",
+  "---",
+  "",
+  "# My Skill",
+  "",
+  "1. First step of the procedure.",
+  "2. Second step.",
+  ""].join(NL);
+function skillStatus(text, isError) {
+  const el = document.getElementById("skill-edit-status");
+  el.textContent = text;
+  el.style.color = isError ? "var(--err)" : "";
+}
+document.getElementById("skill-new").addEventListener("click", () => {
+  skillEdit.name = "";
+  skillEdit.create = true;
+  document.getElementById("skill-edit-name").textContent = "(new skill)";
+  const body = document.getElementById("skill-body-edit");
+  body.value = SKILL_TEMPLATE;
+  skillStatus("new skill — edit the frontmatter and body, then save " +
+    "(it is created under the workspace skills/ dir)");
+  body.focus();
+});
+document.getElementById("skill-save").addEventListener("click", () => {
+  const text = document.getElementById("skill-body-edit").value;
+  ws.send(JSON.stringify({ skills_write: {
+    name: skillEdit.name, text: text, create: skillEdit.create } }));
+  skillStatus("saving...");
+});
+document.getElementById("skill-delete").addEventListener("click", () => {
+  if (!skillEdit.name || skillEdit.create) {
+    skillStatus("nothing loaded to delete", true);
+    return;
+  }
+  if (!document.getElementById("skill-delete").dataset.confirmed) {
+    document.getElementById("skill-delete").dataset.confirmed = "1";
+    document.getElementById("skill-delete").textContent = "sure?";
+    setTimeout(() => {
+      document.getElementById("skill-delete").dataset.confirmed = "";
+      document.getElementById("skill-delete").textContent = "delete";
+    }, 2500);
+    return;
+  }
+  document.getElementById("skill-delete").dataset.confirmed = "";
+  document.getElementById("skill-delete").textContent = "delete";
+  ws.send(JSON.stringify({ skills_delete: { name: skillEdit.name } }));
+  skillStatus("deleting " + skillEdit.name + "...");
+});
 document.getElementById("skills-btn").addEventListener("click", openSkills);
 document.getElementById("skills-close").addEventListener("click", () => {
   document.getElementById("skills-dialog").close();
@@ -2439,6 +2566,49 @@ class SessionManager:
         from rt_harness.infotools import _session_dir
 
         self.dir = _session_dir()
+        #: WHICH document turns autosave into -- the per-session graph
+        #: contract: each session maintains its own context + tree. A
+        #: named load makes THAT file the autosave target (its graph
+        #: keeps growing); /clear pivots back to the scratch slot so a
+        #: fresh chat can never overwrite a named document.
+        self.active_session: str = SessionManager.AUTOSAVE
+
+    def autosave(self) -> str:
+        """Persist the live conversation into the ACTIVE document --
+        named session when one is loaded, the scratch slot otherwise --
+        AND keep the scratch slot a mirror of the same conversation.
+
+        The mirror is the restart-restore contract: startup loads the
+        scratch slot, and the marker it carries pivots the active
+        document back to the named session the operator was in. A
+        mirror that lagged one turn behind would restore a stale
+        conversation with the right name -- the worst of both."""
+        note = self.save(self.active_session)
+        if self.active_session != SessionManager.AUTOSAVE:
+            self.save(SessionManager.AUTOSAVE)
+        return note
+
+    def adopt_document(self, name: str) -> None:
+        """A named load makes THAT file the active document: its turns
+        and its graph edits (branches, switches) autosave into its own
+        file. Each session maintains its own graph."""
+        self.active_session = name
+
+    def start_fresh(self) -> None:
+        """/clear starts a fresh document: pivot the autosave target to
+        the scratch slot so the new conversation can never write over a
+        named session's file. The named graph stays on disk, untouched."""
+        self.active_session = SessionManager.AUTOSAVE
+
+    def drop_active(self, name: str) -> bool:
+        """A deleted session must not resurrect: if it was the ACTIVE
+        named document, pivot to the scratch slot or the next autosave
+        would recreate the file. True when the pivot happened."""
+        if name != SessionManager.AUTOSAVE \
+                and name == self.active_session:
+            self.active_session = SessionManager.AUTOSAVE
+            return True
+        return False
 
     def save(self, name: str) -> str:
         import json
@@ -2450,6 +2620,12 @@ class SessionManager:
         # so the file is both a flat session and a graph.
         if self.tree is not None and self.tree.nodes:
             payload["tree"] = self.tree.to_json()
+        # Which document this conversation BELONGS to: the startup
+        # restore reads it off the autosave slot and pivots the active
+        # session back to the named document the operator was in when
+        # the server restarted -- otherwise the next turn would fork
+        # the conversation into the scratch slot.
+        payload["active_session"] = self.active_session
         path.write_text(json.dumps(payload, ensure_ascii=False),
                         encoding="utf-8")
         return f"session saved to {path.name}"
@@ -2471,6 +2647,16 @@ class SessionManager:
         self.ui.session.tool_calls_made = sum(
             len((m.get("tool_calls") or [])) for m in messages)
         self.loaded_tree = data.get("tree")
+        # The active-session marker is authoritative ONLY on the
+        # autosave mirror (that is what a restart reads to pivot back
+        # into the document the operator was in). A NAMED load IS its
+        # own document -- a backup saved out of another conversation
+        # must not pivot into that conversation's file and overwrite
+        # it when continued.
+        if name == SessionManager.AUTOSAVE:
+            self.loaded_active = str(data.get("active_session") or "")
+        else:
+            self.loaded_active = name
         return True, f"session {name!r} loaded ({len(messages)} messages)"
 
     def delete(self, name: str) -> tuple[bool, str]:
@@ -2621,6 +2807,15 @@ def main() -> int:
         sessions.load(SessionManager.AUTOSAVE)
     except Exception:  # noqa: BLE001 - a bad file is a fresh chat
         pass
+    # If the operator was in a NAMED session when the server restarted,
+    # the autosave slot carries that conversation and its marker: pivot
+    # the active document back to it, so the continuation writes into
+    # the named session's own file -- each session keeps its own graph.
+    restored_active = getattr(sessions, "loaded_active", None)
+    if restored_active and any(
+            row["name"] == restored_active
+            for row in sessions.listing()):
+        sessions.active_session = restored_active
     restored_tree = getattr(sessions, "loaded_tree", None)
     if isinstance(restored_tree, dict) and TREE.from_json(restored_tree):
         # The tree restored. Re-project the engine messages from the
@@ -2885,7 +3080,7 @@ def main() -> int:
             # session" must mean the conversation as it stands, not
             # as it stood when the operator last remembered to save.
             try:
-                sessions.save(SessionManager.AUTOSAVE)
+                sessions.autosave()
             except Exception:  # noqa: BLE001 - persistence is best-effort
                 pass
 
@@ -2914,12 +3109,21 @@ def main() -> int:
                         # frame log IS the new (empty) transcript.
                         HISTORY.clear()
                         await send_pub({"kind": "clear"})
+                        # /clear starts a FRESH document: pivot the
+                        # autosave target back to the scratch slot so
+                        # the new conversation can never write over a
+                        # named session's file. The named graph keeps
+                        # its own tree on disk, untouched.
+                        sessions.start_fresh()
+                        TREE.__init__()
+                        await send_pub({"kind": "tree",
+                                        **TREE.describe()})
                     await send_pub({"kind": "turn_end"})
                 # Slash commands can change the live session (/clear,
                 # /session load, /model): keep the autosave slot in
                 # sync, or a reconnect restores a stale conversation.
                 try:
-                    sessions.save(SessionManager.AUTOSAVE)
+                    sessions.autosave()
                 except Exception:  # noqa: BLE001 - persistence is best-effort
                     pass
                 return
@@ -3330,8 +3534,21 @@ def main() -> int:
                         else:
                             TREE.adopt(ui.session.messages)
                         await repaint_chain(broadcast_tree=True)
-                        await send_pub({"kind": "notice", "text": note})
-                        sessions.save(SessionManager.AUTOSAVE)
+                        # THE per-session graph contract: a loaded named
+                        # session becomes the ACTIVE document -- its
+                        # turns (and its graph edits: branches, switches)
+                        # autosave into ITS file, not the shared slot.
+                        # Each session maintains its own tree from here.
+                        if ok and name:
+                            sessions.adopt_document(name)
+                            await send_pub({
+                                "kind": "notice",
+                                "text": note + " — this session now "
+                                        "maintains its own graph"})
+                        else:
+                            await send_pub({
+                                "kind": "notice", "text": note})
+                        sessions.autosave()
                         continue
                     if verb == "save":
                         note = sessions.save(name or "web-session")
@@ -3350,6 +3567,17 @@ def main() -> int:
                             ui.session.reset()
                             HISTORY.clear()
                             await send_pub({"kind": "clear"})
+                        elif ok and sessions.drop_active(name):
+                            # The ACTIVE named document was deleted:
+                            # the pivot back to scratch happened; clear
+                            # the live conversation so its next autosave
+                            # cannot recreate the file we just removed.
+                            ui.session.reset()
+                            TREE.__init__()
+                            HISTORY.clear()
+                            await send_pub({"kind": "clear"})
+                            await send_pub({"kind": "tree",
+                                            **TREE.describe()})
                         continue
 
                 img = message.get("image")
@@ -3448,7 +3676,146 @@ def main() -> int:
                                     f"skills active: "
                                     f"{', '.join(sel) or '(none)'}"})
                     await send_pub({"kind": "turn_end"})
-                    sessions.save(SessionManager.AUTOSAVE)
+                    sessions.autosave()
+                    continue
+                # -- skill authoring: read / write / delete ------------
+                # The same contract as the TUI's SkillsEditor: the raw
+                # SKILL.md (frontmatter + body) is the portability
+                # contract, edits write the file the skill lives in,
+                # NEW skills go to the workspace (never the operator's
+                # profile dir -- read-mostly from the chat's point of
+                # view; a workspace copy is the override path anyway),
+                # and a save validates frontmatter before it lands.
+                if message.get("skills_read") is not None:
+                    from rt_harness.soul import load_soul  # noqa: F401
+
+                    name = str(message.get("skills_read") or "").strip()
+                    from rt_harness.skills import list_skills, read_skill
+
+                    skills = list_skills(chat_config.root)
+                    skill = read_skill(skills, name) if name else None
+                    if skill is None:
+                        await websocket.send_json({
+                            "kind": "skill_text", "name": name,
+                            "text": "", "path": "",
+                            "new": True,
+                            "error": f"no skill named {name!r}"})
+                        continue
+                    try:
+                        text = skill.path.read_text(encoding="utf-8")
+                    except OSError as exc:
+                        await websocket.send_json({
+                            "kind": "skill_text", "name": skill.name,
+                            "text": "", "path": str(skill.path),
+                            "error": f"could not read: {exc}"})
+                        continue
+                    await websocket.send_json({
+                        "kind": "skill_text", "name": skill.name,
+                        "text": text, "path": str(skill.path)})
+                    continue
+                if isinstance(message.get("skills_write"), dict):
+                    req = message["skills_write"]
+                    name = str(req.get("name") or "").strip()
+                    text = str(req.get("text") or "")
+                    create = bool(req.get("create"))
+                    from rt_harness.skills import (
+                        _FRONTMATTER_RE, _parse_yaml, list_skills,
+                        read_skill)
+
+                    # Validate exactly what the TUI editor validates: a
+                    # save that silently produced an undiscoverable or
+                    # unusable skill would be a lie.
+                    problem = ""
+                    meta: dict[str, Any] = {}
+                    body = text
+                    match = _FRONTMATTER_RE.match(text)
+                    if match:
+                        meta = _parse_yaml(match.group(1))
+                        body = text[match.end():]
+                    if not str(meta.get("name") or "").strip():
+                        problem = ("frontmatter needs a name: "
+                                   "(no frontmatter, or name: empty)")
+                    elif not str(meta.get("description") or "").strip():
+                        problem = ("frontmatter needs a description: "
+                                   "one line saying when it applies")
+                    elif not body.strip():
+                        problem = "the body is empty — a skill is its procedure"
+                    if problem:
+                        await websocket.send_json({
+                            "kind": "skill_saved", "ok": False,
+                            "error": problem})
+                        continue
+                    skills = list_skills(chat_config.root)
+                    skill = read_skill(skills, name) if name else None
+                    if create or skill is None:
+                        # New skill: workspace dir, slug from the name.
+                        import re as _re
+
+                        slug = _re.sub(r"[^a-z0-9-]+", "-",
+                                       name.lower()).strip("-") \
+                            or "my-skill"
+                        root_dir = Path(chat_config.root) / "skills"
+                        base, n = slug, 2
+                        while (root_dir / base).exists() \
+                                and read_skill(list_skills(
+                                    chat_config.root), base) is None:
+                            base = f"{slug}-{n}"
+                            n += 1
+                        target = root_dir / base / "SKILL.md"
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target = skill.path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        target.write_text(text, encoding="utf-8")
+                    except OSError as exc:
+                        await websocket.send_json({
+                            "kind": "skill_saved", "ok": False,
+                            "error": f"could not write: {exc}"})
+                        continue
+                    await websocket.send_json({
+                        "kind": "skill_saved", "ok": True,
+                        "name": str(meta.get("name")),
+                        "path": str(target)})
+                    # The index the model sees changed: rebuild prompts
+                    # (same contract as skills_set -- session.reset so
+                    # the next system message carries the new set).
+                    ui.session.reset()
+                    continue
+                if isinstance(message.get("skills_delete"), dict):
+                    req = message["skills_delete"]
+                    name = str(req.get("name") or "").strip()
+                    from rt_harness.skills import list_skills, read_skill
+
+                    skills = list_skills(chat_config.root)
+                    skill = read_skill(skills, name) if name else None
+                    if skill is None:
+                        await websocket.send_json({
+                            "kind": "skill_saved", "ok": False,
+                            "error": f"no skill named {name!r}"})
+                        continue
+                    try:
+                        if skill.path.parent.is_dir() \
+                                and (skill.path.parent / "SKILL.md") \
+                                == skill.path:
+                            import shutil
+
+                            shutil.rmtree(skill.path.parent)
+                        else:
+                            skill.path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        await websocket.send_json({
+                            "kind": "skill_saved", "ok": False,
+                            "error": f"could not delete: {exc}"})
+                        continue
+                    # The pinned set must not keep a deleted name.
+                    sel = getattr(ui, "_selected_skills", [])
+                    if name in sel:
+                        sel.remove(name)
+                    await websocket.send_json({
+                        "kind": "skill_saved", "ok": True,
+                        "deleted": name})
+                    ui.session.reset()
                     continue
                 if message.get("core_show") is True:
                     from rt_harness.soul import load_soul
@@ -3517,7 +3884,7 @@ def main() -> int:
                             TREE.messages_for(TREE.active)
                         await repaint_chain(broadcast_tree=True,
                                             switched_to=nid)
-                        sessions.save(SessionManager.AUTOSAVE)
+                        sessions.autosave()
                     continue
                 if message.get("tree_show") is True:
                     await websocket.send_json({"kind": "tree",

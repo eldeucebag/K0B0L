@@ -133,8 +133,18 @@ async def main(tmpdir: str) -> None:
     ui = PlainChat(OllamaClient("http://127.0.0.1:9"), config,
                    tool_output="summary", out=out)
     ui.dispatch("/skills edit")
-    check("plain mode explains it cannot host the editor",
-          "Textual front end" in out.getvalue(), out.getvalue()[-120:])
+    check("plain mode prints usage for the by-chat editor",
+          "usage: /skills edit" in out.getvalue(), out.getvalue()[-120:])
+    ui.dispatch("/skills new by-chat-probe")
+    from pathlib import Path as _P
+
+    made = list((_P(td) / "workspace" / "skills").glob("by-chat-probe*/SKILL.md"))
+    check("plain mode creates skills by chat",
+          bool(made), "no template under workspace/skills")
+    ui.dispatch("/skills delete by-chat-probe")
+    check("plain mode deletes skills by chat",
+          not made[0].exists() if made else False,
+          "template survived /skills delete")
 
 
 with TemporaryDirectory() as td:

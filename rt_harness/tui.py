@@ -485,12 +485,93 @@ class ChatUI(ChatHooks):
                     self.session.reset()
                     self.line(f"skills active: {', '.join(self._selected_skills) or '(none)'}")
             elif verb == "edit":
-                # Only the full-screen front end has a modal editor; the base
-                # says so rather than pretending a line mode could host one.
-                self.line("the skills editor needs the Textual front end "
-                          "(start the chat without --chat-plain)")
+                # Editing by chat: the full-screen front end has a modal
+                # editor, but the BASE can still read/write the raw file --
+                # /skills edit <name> prints the SKILL.md with its path
+                # so the operator can edit it anywhere, and /skills new
+                # creates the template to fill in.
+                if not rest:
+                    self.line("usage: /skills edit <name> | new [name] | show <name> | delete <name>")
+                    return True
+                from .skills import read_skill
+
+                skill = read_skill(self._skills(), rest)
+                if skill is None:
+                    self.line(f"no skill named {rest!r}")
+                else:
+                    self.line(f"--- {skill.path} ---")
+                    for ln in skill.path.read_text(encoding="utf-8").splitlines():
+                        self.line(ln)
+            elif verb == "show":
+                if not rest:
+                    self.line("usage: /skills show <name>")
+                else:
+                    from .skills import read_skill
+
+                    skill = read_skill(self._skills(), rest)
+                    if skill is None:
+                        self.line(f"no skill named {rest!r}")
+                    else:
+                        self.line(f"--- {skill.path} ---")
+                        for ln in skill.body.splitlines():
+                            self.line(ln)
+            elif verb == "new":
+                # Create a skill from the template in the WORKSPACE dir
+                # (never the profile dir): the chat's skills are the
+                # conversation's own doctrine, and the profile stays
+                # read-mostly -- a workspace copy is the override path.
+                from pathlib import Path as _P
+                import re as _re
+
+                name = rest or "my-skill"
+                slug = _re.sub(r"[^a-z0-9-]+", "-",
+                               name.lower()).strip("-") or "my-skill"
+                root = _P(self.session.workspace.root) / "skills"
+                base, n = slug, 2
+                while (root / base).exists():
+                    base = f"{slug}-{n}"
+                    n += 1
+                target = root / base / "SKILL.md"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    "---\n"
+                    f"name: {name}\n"
+                    "description: One line saying when this skill applies.\n"
+                    "trigger:\n"
+                    "  keywords: []\n"
+                    "requires: []\n"
+                    "\n"
+                    f"# {name}\n"
+                    "\n"
+                    "1. First step of the procedure.\n"
+                    "2. Second step.\n",
+                    encoding="utf-8")
+                self.line(f"created {target} — edit it, then it is "
+                          "discoverable on the next /skills list")
+            elif verb == "delete":
+                if not rest:
+                    self.line("usage: /skills delete <name>")
+                    return True
+                from .skills import read_skill
+
+                skill = read_skill(self._skills(), rest)
+                if skill is None:
+                    self.line(f"no skill named {rest!r}")
+                else:
+                    if skill.path.parent.is_dir() \
+                            and (skill.path.parent / "SKILL.md") == skill.path:
+                        import shutil
+
+                        shutil.rmtree(skill.path.parent)
+                    else:
+                        skill.path.unlink(missing_ok=True)
+                    if rest in self._selected_skills:
+                        self._selected_skills = [
+                            s for s in self._selected_skills if s != rest]
+                        self.session.reset()
+                    self.line(f"deleted skill {rest}")
             else:
-                self.line("usage: /skills list | enable <name> | disable <name> | edit [name]")
+                self.line("usage: /skills list | enable <name> | disable <name> | show <name> | new [name] | edit <name> | delete <name>")
         elif command == "/mcp":
             self._command_mcp(argument)
         elif command == "/exec":

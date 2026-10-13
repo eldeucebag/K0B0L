@@ -44,7 +44,16 @@ The unit source ships in `tools/webui.service` (installed to
   generation.
 - **Sessions**: autosaved after every turn; a refresh restores the last
   conversation; the ≡ panel lists, loads, saves, and deletes named
-  sessions.
+  sessions. Each session maintains its own graph: loading a named
+  session makes that document the autosave target (its turns and
+  branch edits grow ITS file), a new chat (`/clear`) pivots back to
+  the scratch slot so it can never overwrite a named document, and a
+  restart restores the conversation you were in.
+- **Skill authoring** (🧠): click a skill to open its raw SKILL.md in
+  the editor — create from a template, save (frontmatter-validated),
+  delete (click twice). New skills are created in the workspace
+  `skills/` dir, never the profile. The same operations work by chat:
+  `/skills new|show|edit|delete`.
 - **Themes** (⚙): the same seven palettes as the terminal front ends,
   persisted to `~/.k0b0l-chat-ui.json` — the web and the TUI agree.
 - **Options** (⚙): model, show-thinking, tool-output level, clear.
