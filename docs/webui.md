@@ -54,6 +54,16 @@ The unit source ships in `tools/webui.service` (installed to
   delete (click twice). New skills are created in the workspace
   `skills/` dir, never the profile. The same operations work by chat:
   `/skills new|show|edit|delete`.
+- **Input bar**: three lines tall, growing with the message (Enter
+  sends, Shift+Enter is a newline). **+** attaches a file — its text
+  is appended to the prompt on send (the model sees it as part of the
+  message); the button stays flagged until the send consumes it.
+- **Copy on every message**: each turn's header row carries a ⧉ that
+  copies that message whole (the prompt, or the model's full answer).
+- **Scrolling is yours**: new content follows only while you are at
+  the bottom — scroll up to read the backlog while an answer streams
+  and it stays put; your own send (or a fresh page load) jumps to
+  the latest once.
 - **Themes** (⚙): the same seven palettes as the terminal front ends,
   persisted to `~/.k0b0l-chat-ui.json` — the web and the TUI agree.
 - **Options** (⚙): model, show-thinking, tool-output level, clear.

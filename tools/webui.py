@@ -154,9 +154,15 @@ header .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
 }
 .turn { display: flex; flex-direction: column; gap: 14px; }
 .who { font-size: 11px; letter-spacing: 0.14em; color: var(--faint);
-       text-transform: uppercase; margin-bottom: -8px; }
+       text-transform: uppercase; margin-bottom: -8px;
+       display: flex; align-items: center; gap: 8px; }
 .who.you { color: var(--accent); }
 .who.busy { color: var(--muted); }
+.who-copy { background: none; border: 0; color: var(--faint);
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+  opacity: 0; transition: opacity 0.12s ease; }
+.who:hover .who-copy { opacity: 1; }
+.who-copy:hover { color: var(--accent); }
 .typing { display: inline-block; margin-left: 6px; }
 .typing .dot { opacity: 0.25; }
 .typing.busy .dot { animation: bounce 1.2s infinite; }
@@ -261,16 +267,34 @@ figcaption { color: var(--faint); font-size: 11.5px;
 }
 .artifact-actions .act:hover { color: var(--accent); border-color: var(--accent); }
 form { display: flex; gap: 10px; padding: 12px 16px;
-  border-top: 1px solid #1d2330; background: var(--surface); }
-#input {
-  flex: 1; background: var(--bg); color: var(--ink);
+  border-top: 1px solid #1d2330; background: var(--surface);
+  align-items: flex-end; }
+#input, #attach-note {
+  background: var(--bg); color: var(--ink);
   border: 1px solid #242c3d; border-radius: 8px; padding: 10px 12px;
   font: 14px/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
+#input {
+  flex: 1; resize: none; overflow-y: auto;
+  /* Three lines tall at rest (1fr rows on the shell mean the form is
+     a fixed band; the textarea owns its height), growing with the
+     message up to a sane ceiling. */
+  min-height: 3.9em; max-height: 14em;
+  transition: min-height 0.12s ease;
+}
 #input:focus { outline: none; border-color: var(--accent); }
+#attach {
+  background: none; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 8px; width: 42px; height: 42px; cursor: pointer;
+  font-size: 20px; line-height: 1; flex-shrink: 0;
+}
+#attach:hover { color: var(--accent); border-color: var(--accent); }
+#attach.has-file { color: var(--accent); border-color: var(--accent); }
+#attach-file { display: none; }
 #send {
   background: var(--accent); color: var(--accent-ink); border: 0;
   border-radius: 8px; padding: 0 20px; font-weight: 600; cursor: pointer;
+  height: 42px;
 }
 #send:disabled { opacity: 0.4; cursor: default; }
 #send.cancel {
@@ -370,6 +394,17 @@ form { display: flex; gap: 10px; padding: 12px 16px;
 }
 #overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40;
+}
+#toast-host {
+  position: fixed; bottom: 86px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  z-index: 60; pointer-events: none;
+}
+.toast {
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 14px; font-size: 12.5px; font-family: var(--mono);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
 }
 dialog {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -525,11 +560,16 @@ dialog button.primary:hover { color: var(--accent-ink); }
 <main id="transcript" aria-live="polite"></main>
 <div id="tree-hint" style="display:none"></div>
 <form id="form">
-  <input id="input" autocomplete="off" placeholder="ask, or / for commands"
-         aria-label="message">
+  <textarea id="input" rows="3" autocomplete="off"
+    placeholder="ask, or / for commands" aria-label="message"
+    spellcheck="false"></textarea>
+  <input type="file" id="attach-file" hidden>
+  <button id="attach" type="button" title="attach a file — its contents
+    are appended to the prompt on send">+</button>
   <button id="send">send</button>
 </form>
 <div id="overlay" hidden></div>
+<div id="toast-host"></div>
 <dialog id="image-dialog">
   <h3>generate an image</h3>
   <div class="img-tabs">
@@ -815,7 +855,14 @@ function fallbackCopy(text) {
   ta.remove();
 }
 function toast(text) {
-  const t = el("div", "notice", text);
+  // A toast is ephemeral chrome, NOT conversation: it never opens a
+  // turn (a notice-style el would create a stray turn in the
+  // transcript and pollute the cache/replay), and it self-removes.
+  const host = document.getElementById("toast-host");
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.textContent = text;
+  (host || document.body).appendChild(t);
   setTimeout(() => t.remove(), 2200);
 }
 function artifactButtons(frame, opts) {
@@ -1091,14 +1138,114 @@ function ensureTurn() {
 }
 function who(name, cls) {
   ensureTurn();
-  const el = document.createElement("div");
-  el.className = "who " + (cls || "");
-  el.textContent = name;
-  turn.appendChild(el);
-  return el;  // the assistant handler anchors the dots to this element
+  const row = document.createElement("div");
+  row.className = "who " + (cls || "");
+  row.textContent = name;
+  // Every turn (user and model alike) carries a copy icon: it copies
+  // the turn's whole text content -- the operator's prompt, or the
+  // model's full answer including code blocks -- to the clipboard.
+  // MYTURN is the turn this row belongs to: the module-level `turn`
+  // variable moves on with later frames, so closing over it directly
+  // would copy from whatever turn is rendering when the click lands.
+  const myTurn = turn;
+  const cp = document.createElement("button");
+  cp.className = "who-copy";
+  cp.textContent = "⧉";
+  cp.title = "copy this message";
+  cp.addEventListener("click", () => {
+    // The turn's text: every content block in it, joined by newlines.
+    // The who row (label + this button + the typing dots it anchors)
+    // is chrome, not content -- skip it whole.
+    const parts = [];
+    for (const child of myTurn.children) {
+      if (child === row) continue;
+      const cls2 = String(child.className || "");
+      if (cls2.includes("artifact-actions")) continue;
+      if (cls2.includes("think") || cls2.includes("genbar")) continue;
+      parts.push(child.textContent || "");
+    }
+    copyText(parts.join(String.fromCharCode(10)).trim());
+  });
+  row.appendChild(cp);
+  turn.appendChild(row);
+  return row;  // the assistant handler anchors the dots to this element
+}
+// -- attach: a file's contents ride with the prompt on send -----------
+// The + button opens a picker; the chosen file is read as TEXT (the
+// harness's chat works in text -- a binary would be gibberish in the
+// prompt and the model-visible surface is the message itself). The
+// send handler appends it as a fenced block, so the model sees the
+// file as part of the message and the transcript shows the message as
+// it was sent. Images route through the img2img dialog instead.
+let attachedFile = null;   // {name, text}
+const attachBtn = document.getElementById("attach");
+const attachFileEl = document.getElementById("attach-file");
+attachBtn.addEventListener("click", () => attachFileEl.click());
+attachFileEl.addEventListener("change", () => {
+  const file = attachFileEl.files && attachFileEl.files[0];
+  attachFileEl.value = "";   // allow re-picking the same file
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    attachedFile = { name: file.name, text: String(reader.result || "") };
+    attachBtn.classList.add("has-file");
+    attachBtn.title = "attached " + file.name + " — it is appended to " +
+      "the prompt on send; click to replace";
+    toast("attached " + file.name + " (" +
+      Math.round(file.size / 102.4) / 10 + " KB)");
+  };
+  reader.onerror = () => toast("could not read " + file.name);
+  reader.readAsText(file);
+});
+function consumeAttached() {
+  // The prompt plus its attachment, or null when nothing is attached.
+  if (!attachedFile) return null;
+  const out = attachedFile;
+  attachedFile = null;
+  attachBtn.classList.remove("has-file");
+  attachBtn.title = "attach a file — its contents are appended to the " +
+    "prompt on send";
+  return out;
+}
+input.addEventListener("input", () => {
+  // Autosize: the textarea grows with its content up to the CSS cap
+  // (max-height); a fixed rows=3 alone would SCROLL long drafts
+  // instead of expanding, and the operator asked for an expanding bar.
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight,
+    parseInt(getComputedStyle(input).maxHeight, 10) || 224) + "px";
+});
+input.addEventListener("keydown", (e) => {
+  // Enter sends; Shift+Enter is a real newline now that the input is a
+  // textarea (it was impossible to type one before).
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    document.getElementById("form").requestSubmit();
+  }
+});
+
+// -- scroll: follow only when the operator is already at the bottom ----
+// Forced autoscroll on every delta yanks the operator out of the
+// backlog they are reading while an answer streams. The transcript
+// now follows only when they are near the bottom (within ~a
+// screenful); anywhere else, new content lands silently below.
+// forceScroll marks moments the operator asked for: their own send,
+// and a fresh connect repaint. A scroll-up cancels the follow until
+// they return to the bottom. (Declared BEFORE scroll() -- a let is
+// TDZ-hoisted and the replay calls scroll() long before this block's
+// neighbours finish evaluating.)
+let forceScroll = false;
+transcript.addEventListener("scroll", () => {
+  if (!nearBottom()) forceScroll = false;
+});
+function nearBottom() {
+  return transcript.scrollHeight - transcript.scrollTop
+    - transcript.clientHeight < 160;
 }
 function scroll() {
-  transcript.scrollTop = transcript.scrollHeight;
+  if (forceScroll || nearBottom()) {
+    transcript.scrollTop = transcript.scrollHeight;
+  }
 }
 function el(tag, cls, text) {
   ensureTurn();
@@ -1271,6 +1418,7 @@ function wireSocket() {
       setBusy(false);
       turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null;
+      forceScroll = false;   // a finished turn ends the forced follow
       input.focus();
       persistCache();
       break;
@@ -1284,6 +1432,10 @@ function wireSocket() {
       break;
     case "restore_end":
       restoring = false;
+      // A connect repaint is a moment the operator wants to see the
+      // latest: follow to the bottom once, then normal rules apply.
+      forceScroll = true;
+      scroll();
       persistCache();
       break;
     case "clear":
@@ -1424,12 +1576,21 @@ document.getElementById("form").addEventListener("submit", (e) => {
     try { ws.send(JSON.stringify({"cancel": true})); } catch (err) {}
     return;
   }
-  const text = input.value.trim();
+  const typed = input.value.trim();
+  // The attachment rides with the prompt: the file's text is appended
+  // as a fenced block so the model sees it as part of the message.
+  const attach = consumeAttached();
+  const text = typed + (attach
+    ? (typed ? String.fromCharCode(10) : "")
+      + "attached file: " + attach.name + String.fromCharCode(10)
+      + "```" + String.fromCharCode(10) + attach.text
+      + String.fromCharCode(10) + "```"
+    : "");
   if (!text) return;
   // A bare "/image" (optionally "<model> <prompt>") opens the image
   // dialog instead of sending the stripped-down command: the dialog is
   // the full surface (negative prompt, size, steps, seed).
-  if (text === "/image" || text.startsWith("/image ")) {
+  if (!attach && (text === "/image" || text.startsWith("/image "))) {
     const rest = text.slice("/image".length).trim();
     let model = "";
     let prompt = rest;
@@ -1443,6 +1604,7 @@ document.getElementById("form").addEventListener("submit", (e) => {
     return;
   }
   input.value = "";
+  forceScroll = true;   // the operator's own send always follows
   ws.send(JSON.stringify({ text }));
 });
 
