@@ -316,6 +316,39 @@ class ChatSession:
         self.turns = 0
         self.tool_calls_made = 0
 
+    def text_protocol_prompt(self) -> str:
+        """This session's text-protocol block: the standard list minus
+        generate_image in interactive-prompt mode, with an explicit
+        note so the model knows images are operator-off rather than
+        nonexistent (a missing tool reads as 'try harder')."""
+        from .tools import (
+            TEXT_TOOL_PROTOCOL, TOOL_NAMES, TOOL_SCHEMAS, TOOLS_PLACEHOLDER,
+            text_protocol_prompt as base_prompt,
+        )
+        if not self.config.no_image_tool:
+            return base_prompt(self.info is not None)
+        from .infotools import INFO_TOOL_SCHEMAS
+
+        lines = []
+        schemas = [s for s in TOOL_SCHEMAS
+                   if s["function"]["name"] != "generate_image"]
+        if self.info is not None:
+            schemas = schemas + INFO_TOOL_SCHEMAS
+        for schema in schemas:
+            function = schema["function"]
+            args = ", ".join(
+                function["parameters"]["properties"]) or "none"
+            lines.append(
+                f"- {function['name']}({args}): "
+                f"{function['description']}")
+        block = TEXT_TOOL_PROTOCOL.replace(
+            TOOLS_PLACEHOLDER, "\n".join(lines))
+        return (block
+                + "\n\nImage generation is turned OFF by the operator "
+                "for this conversation: do NOT call generate_image and "
+                "do NOT write an image prompt as a tool call. Discuss "
+                "and refine image prompts in plain prose instead.")
+
     def system_prompt(self) -> str:
         """The system message: soul, operator text, docs index, tool protocol."""
         from .docs import docs_index
@@ -361,10 +394,18 @@ class ChatSession:
         if self.uses_tools():
             extra = " and harness info tools" if self.info else ""
             if self.protocol == "text":
-                parts.append(text_protocol_prompt(self.info is not None))
+                parts.append(self.text_protocol_prompt())
             else:
                 parts.append(
                     "You have file tools" + extra + " available. Read a file before editing it."
+                )
+            if self.config.no_image_tool:
+                parts.append(
+                    "Image generation is turned OFF by the operator for "
+                    "this conversation. Never call generate_image. When "
+                    "the operator wants to work on an image prompt, "
+                    "discuss and refine the prompt in plain prose -- "
+                    "they generate from the image dialog themselves."
                 )
             # Self-memorization: the memory is the model's own, and so is the
             # decision to use it. The instruction states the mechanic and the
@@ -536,6 +577,19 @@ class ChatSession:
             options["top_k"] = config.top_k
         return options
 
+    def _schemas(self) -> list[dict[str, Any]]:
+        """The tool schemas offered this turn. The interactive-prompt
+        mode (``no_image_tool``) removes generate_image entirely: a
+        model told not to generate must not be handed the handle to a
+        multi-minute GPU swap it can pull anyway."""
+        from .infotools import INFO_TOOL_SCHEMAS
+
+        schemas = list(TOOL_SCHEMAS)
+        if self.config.no_image_tool:
+            schemas = [s for s in schemas
+                       if s["function"]["name"] != "generate_image"]
+        return schemas + INFO_TOOL_SCHEMAS + self._mcp_schemas()
+
     def _turn(self) -> tuple[str, str, list[tuple[str, dict[str, Any]]], TurnStats]:
         """Stream one assistant reply.
 
@@ -546,9 +600,7 @@ class ChatSession:
         started = time.monotonic()
         tools = None
         if self.uses_tools() and self.protocol == "native":
-            from .infotools import INFO_TOOL_SCHEMAS
-
-            tools = TOOL_SCHEMAS + INFO_TOOL_SCHEMAS + self._mcp_schemas()
+            tools = self._schemas()
         think = self.config.thinking
 
         content: list[str] = []
@@ -702,6 +754,22 @@ class ChatSession:
         for name, arguments in calls:
             self.hooks.tool_call(name, arguments)
             self.tool_calls_made += 1
+            if name == "generate_image" and self.config.no_image_tool:
+                # Belt and braces: the tool was not offered, but a
+                # model can still emit the call (small abliterated
+                # models especially). Refuse it with the reason rather
+                # than silently generating -- the operator turned
+                # images off to work on prompts interactively.
+                result = ToolResult(
+                    False, "image generation is turned off by the "
+                    "operator for this conversation; refine the prompt "
+                    "in prose instead")
+                self.hooks.tool_result(name, result)
+                self.messages.append(
+                    {"role": "tool", "tool_name": name,
+                     "content": "generate_image -> error\n"
+                                 "refused: image generation is off"})
+                continue
             if name in info_names and self.info is not None:
                 result = self.info.call(name, arguments)
             elif name in mcp_names and self.mcp is not None:

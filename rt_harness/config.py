@@ -223,6 +223,12 @@ class ChatConfig:
     tool_output: str = "summary"
     #: ``None`` leaves the model's own default in place.
     thinking: bool | None = None
+    #: The operator's interactive-prompt mode: when True the model is
+    #: NOT offered generate_image at all (schemas, text-protocol list,
+    #: system prompt), and a call that slips through anyway is refused
+    #: with an explanation instead of silently generating -- the model
+    #: ignoring "do not generate" must not cost a GPU swap cycle.
+    no_image_tool: bool = False
     #: Files the chat may touch. Kept here explicit so a run control command
     #: never silently widens them.
     skills_dir: Path = field(default_factory=lambda: Path("skills"))

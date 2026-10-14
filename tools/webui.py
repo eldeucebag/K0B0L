@@ -703,6 +703,18 @@ dialog button.primary:hover { color: var(--accent-ink); }
     <label class="switch"><input type="checkbox" id="opt-think"><span></span></label>
   </div>
   <div class="opt-row">
+    <label class="opt-label">reasoning</label>
+    <select id="opt-reason">
+      <option value="auto">auto — the model's default</option>
+      <option value="on">on — ask it to reason</option>
+      <option value="off">off — no reasoning tokens</option>
+    </select>
+  </div>
+  <div class="opt-row">
+    <label class="opt-label">model image tool</label>
+    <label class="switch"><input type="checkbox" id="opt-imagetool"><span></span></label>
+  </div>
+  <div class="opt-row">
     <label class="opt-label">tool output</label>
     <select id="opt-tools">
       <option value="off">off</option>
@@ -722,8 +734,8 @@ dialog button.primary:hover { color: var(--accent-ink); }
     <summary>CORE.md (the identity this session speaks through)</summary>
     <pre id="core-text" class="core-text"></pre>
   </details>
-  <details class="core-details">
-    <summary>skill editor (create / edit / delete)</summary>
+  <details class="core-details" open>
+    <summary>skill editor — click a skill above to edit it</summary>
     <div class="skill-edit-head">
       <span id="skill-edit-name" class="sk-name"></span>
       <button id="skill-new" class="act">+ new</button>
@@ -1266,6 +1278,12 @@ function wireSocket() {
     case "meta":
       meta.textContent = m.model + " · " + m.protocol + " · ctx " + m.num_ctx;
       applyTheme(m.theme || "k0b0l-dark");
+      // the reasoning select reflects the server's truth (a fresh
+      // connect, a /reason from another tab, a restart)
+      const rs = document.getElementById("opt-reason");
+      if (rs && m.reasoning) rs.value = m.reasoning;
+      const itb = document.getElementById("opt-imagetool");
+      if (itb && m.imagetool !== undefined) itb.checked = m.imagetool;
       break;
     case "you":
       newTurn(); who("you", "you");
@@ -2056,6 +2074,11 @@ function renderSkills(skills, active) {
       ws.send(JSON.stringify({ skills_read: sk.name }));
       skillEdit.name = sk.name;
       skillEdit.create = false;
+      // make sure the editor is in view -- a collapsed details block
+      // hid the edit/delete surface entirely (the operator's report)
+      const details = document.getElementById("skill-body-edit")
+        .closest("details");
+      if (details) details.open = true;
       document.getElementById("skill-edit-name").textContent = sk.name;
       document.getElementById("skill-edit-status").textContent =
         "loading " + sk.name + "...";
@@ -2179,6 +2202,22 @@ modelSel.addEventListener("change", () => {
 
 thinkBox.addEventListener("change", () => {
   ws.send(JSON.stringify({ text: "/think " + (thinkBox.checked ? "on" : "off") }));
+});
+// Reasoning GENERATION (not display): off stops reasoning tokens
+// entirely. Sent as the /reason command so the engine's rebuild path
+// (which carries the conversation) is the one that applies it.
+const reasonSel = document.getElementById("opt-reason");
+reasonSel.addEventListener("change", () => {
+  ws.send(JSON.stringify({ text: "/reason " + reasonSel.value }));
+});
+// The model's image tool: unchecked, generate_image is withheld from
+// the model entirely -- prompts get refined in prose instead of the
+// model firing a multi-minute GPU swap on its own initiative. The 🎨
+// dialog (operator-side) is unaffected.
+const imageToolBox = document.getElementById("opt-imagetool");
+imageToolBox.addEventListener("change", () => {
+  ws.send(JSON.stringify({ text: "/imagetool "
+    + (imageToolBox.checked ? "on" : "off") }));
 });
 toolsSel.addEventListener("change", () => {
   ws.send(JSON.stringify({ text: "/tools " + toolsSel.value }));
@@ -3163,6 +3202,10 @@ def main() -> int:
             "protocol": ui.session.protocol,
             "num_ctx": ui.session.config.num_ctx,
             "theme": saved_theme or "k0b0l-dark",
+            "reasoning": ("auto" if ui.session.config.thinking is None
+                          else ("on" if ui.session.config.thinking
+                                else "off")),
+            "imagetool": not ui.session.config.no_image_tool,
             "restored": len(HISTORY) > 0,
         })
         # The transcript replay: everything the server has rendered this
@@ -3279,6 +3322,17 @@ def main() -> int:
                 async with TURN_LOCK:
                     handled = await loop.run_in_executor(
                         None, ui.dispatch, text)
+                    # The dispatch ran on the EXECUTOR: its line()
+                    # renders were scheduled onto this loop via
+                    # call_soon_threadsafe and may still be QUEUED.
+                    # Closing the turn now ships turn_end BEFORE the
+                    # command's own output, which then lands after the
+                    # bracket -- invisible live, resurrected on replay
+                    # (the "output belongs to the next command" bug).
+                    # The documented flush: give the scheduled sends a
+                    # real beat to run (ensure_future chains a second
+                    # hop; sleep(0) does not reliably cross it).
+                    await asyncio.sleep(0.2)
                     if not handled:
                         await send_pub(
                             {"kind": "raw", "text": text})

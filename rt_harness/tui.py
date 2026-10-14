@@ -352,6 +352,45 @@ class ChatUI(ChatHooks):
                 self.line(f"tool output → chat: {argument}")
             else:
                 self.line(f"tool output is {self.tool_output!r}; use {'|'.join(TOOL_VERBOSITY)}")
+        elif command == "/imagetool":
+            # Interactive-prompt mode: on = the model may generate
+            # images itself; off = generate_image is withheld entirely
+            # (schema, protocol, and a refusal guard) so the operator
+            # can create and refine image prompts in prose without the
+            # model firing a GPU swap on its own initiative.
+            if argument in ("on", "off"):
+                self.rebuild(no_image_tool=argument == "off")
+                self.line("image tool is "
+                          + ("off — the model cannot generate images; "
+                             "work prompts in prose (the 🎨 dialog "
+                             "still works for you)"
+                             if argument == "off"
+                             else "on — the model can generate images"))
+            else:
+                state = self.session.config.no_image_tool
+                self.line(f"image tool is "
+                          f"{'off' if state else 'on'}; "
+                          "use /imagetool on|off")
+        elif command == "/reason":
+            # GENERATION of reasoning, not its display (/think): off
+            # asks the model for no reasoning tokens at all (CHAT_THINK
+            # equivalents: on/off/auto). Auto leaves the request unset
+            # so the server's template default decides. rebuild() (not a
+            # raw config write): the config is frozen, and rebuild
+            # carries the conversation across the settings change.
+            if argument in ("on", "off", "auto"):
+                self.rebuild(
+                    thinking=None if argument == "auto"
+                    else argument == "on")
+                state = {"on": "on — the model reasons",
+                         "off": "off — no reasoning tokens",
+                         "auto": "auto — the model's default"}
+                self.line("reasoning is " + state[argument])
+            else:
+                current = self.session.config.thinking
+                shown = "auto" if current is None else \
+                    ("on" if current else "off")
+                self.line(f"reasoning is {shown}; use /reason on|off|auto")
         elif command == "/think":
             if argument in ("on", "off"):
                 self.show_thinking = argument == "on"

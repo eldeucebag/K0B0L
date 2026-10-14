@@ -66,7 +66,12 @@ The unit source ships in `tools/webui.service` (installed to
   the latest once.
 - **Themes** (⚙): the same seven palettes as the terminal front ends,
   persisted to `~/.k0b0l-chat-ui.json` — the web and the TUI agree.
-- **Options** (⚙): model, show-thinking, tool-output level, clear.
+- **Options** (⚙): model, show-thinking, reasoning generation
+  (`off` asks the model for no reasoning tokens at all — distinct from
+  show-thinking, which only hides them), **model image tool**
+  (unchecked, the model cannot generate images at all — build and
+  refine image prompts in prose; your 🎨 dialog is unaffected),
+  tool-output level, clear.
 
 ## Generations survive a refresh
 

@@ -9,6 +9,8 @@ are handled by the front end, not by the model, and an unambiguous prefix works
 | `/help` | The command list |
 | `/tools off\|summary\|full` | How much of a tool result is rendered into the transcript |
 | `/think on\|off` | Show or hide the model's reasoning tokens |
+| `/reason on\|off\|auto` | Reasoning GENERATION: off asks for no reasoning tokens at all (auto leaves the model's default) — display stays `/think` |
+| `/imagetool on\|off` | Whether the MODEL may generate images: off withholds `generate_image` entirely (schema, protocol, refusal guard) so image prompts can be built and refined in prose without the model firing a GPU swap — the 🎨 dialog still works for you |
 | `/read <path>` | Print a workspace file into the chat |
 | `/docs [topic]` | List the product docs, or print one |
 | `/core` | Show the CORE.md this session loaded, and its path (alias: `/soul`) |
