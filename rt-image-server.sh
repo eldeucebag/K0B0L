@@ -11,7 +11,10 @@
 set -u
 MODEL="${1:-pony}"
 DIR=/mnt/k0b0l-models
-BIN=/tmp/sd-cpp/build/bin/sd-server
+# The binary lives OUTSIDE /tmp now: a reboot wipes /tmp and silently
+# kills every image generation (the launcher then dies with "No such
+# file or directory" and the run wedges). Home survives reboots.
+BIN="${K0B0L_SD_SERVER:-/home/jeff/sd-cpp/build/bin/sd-server}"
 
 case "$MODEL" in
   pony)

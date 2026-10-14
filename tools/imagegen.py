@@ -47,7 +47,8 @@ FILES = {
 #: Where the sd.cpp binaries live (built from leejet/stable-diffusion.cpp with
 #: CUDA 12.5 + g++-12 for the Pascal card). Qwen and Chroma run through it
 #: because their GGUF DiT files are sd.cpp's native format.
-SD_BIN = Path(os.environ.get("K0B0L_SD_BIN", "/tmp/sd-cpp/build/bin/sd-cli"))
+SD_BIN = Path(os.environ.get("K0B0L_SD_BIN",
+                             "/home/jeff/sd-cpp/build/bin/sd-cli"))
 
 
 def list_installed() -> int:

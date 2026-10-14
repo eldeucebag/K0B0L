@@ -3124,6 +3124,23 @@ def main() -> int:
                     "kind": "notice",
                     "text": "this client cannot cancel mid-turn"})
 
+        # Belt and braces: whatever path was taken, a cancelled
+        # generation must never leave the page wedged in busy state.
+        # A run whose executor thread is wedged in a dead urlopen (a
+        # crashed image server, a down router) never reaches its own
+        # finally -- the run was retired above, but the busy dots and
+        # the send/cancel button key on the `busy` flag, so close the
+        # visible turn here too. Idempotent with the frames above.
+        if current_task["task"] is not None:
+            current_task["task"] = None
+        if GEN["active"] is None and not getattr(
+                ui, "_inference_in_progress", False):
+            try:
+                await send_pub({"kind": "turn_end"})
+                await send_pub({"kind": "busy", "on": False})
+            except Exception:  # noqa: BLE001
+                pass
+
     async def page(request):
         return HTMLResponse(PAGE)
 

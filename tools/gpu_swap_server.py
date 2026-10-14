@@ -34,8 +34,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 LLAMA_DIR = Path("/home/jeff/llama-prism-b10743-adfffbe")
 IMAGE_SERVER = REPO / "rt-image-server.sh"
-LLAMA_LOG = "/tmp/llama-router.log"
-SD_LOG = "/tmp/sd-server.log"
+LLAMA_LOG = "/var/tmp/k0b0l-llama-router.log"
+SD_LOG = "/var/tmp/k0b0l-sd-server.log"
 
 LLAMA_URL = "http://127.0.0.1:11434"
 IMAGE_URL = "http://127.0.0.1:7860"
