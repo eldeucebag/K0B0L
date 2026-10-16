@@ -1369,7 +1369,47 @@ Available tools:
 #: substitution is a plain replace.
 TOOLS_PLACEHOLDER = "<<TOOLS>>"
 
+#: Some models emit nearly-correct JSON: a fence that closes one brace
+#: short, or nesting the regex's non-greedy stop cuts early. The parser
+#: therefore re-balances: it scans the fenced body brace-by-brace and,
+#: when the model left it unclosed, closes it before json.loads. A
+#: missing brace is a small-model arithmetic slip, not a protocol
+#: violation -- the call still names a real tool with readable
+#: arguments, and dropping it silently cost the operator every
+#: ask_user_choice popup in a live session.
 TEXT_CALL_RE = re.compile(r"```(?:tool|tool_call|json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _balanced_json(body: str) -> str:
+    """A brace-balanced version of ``body``: scans left to right
+    tracking string state and the depth of braces AND brackets
+    separately, appending the closers a truncated body is missing
+    (innermost-first). Returns the input when it already balances."""
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for ch in body:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack and ((ch == "}" and stack[-1] == "{")
+                          or (ch == "]" and stack[-1] == "[")):
+                stack.pop()
+    if not stack:
+        return body
+    return body + "".join(
+        "}" if opener == "{" else "]" for opener in reversed(stack))
 
 #: Some models spell tool calls the way their own training did rather than the
 #: way the protocol prompt asks. Both spellings name a real tool with real
@@ -1510,10 +1550,17 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
     found: list[tuple[int, int, str, dict[str, Any]]] = []
     for pattern in (TEXT_CALL_RE, TAG_CALL_RE):
         for match in pattern.finditer(text):
+            body = match.group(1)
             try:
-                payload = json.loads(match.group(1))
+                payload = json.loads(body)
             except ValueError:
-                continue  # malformed JSON: a near-miss, left in prose
+                # Small models leave the JSON one closer short; the
+                # call itself is well-formed intent. Re-balance and
+                # retry ONCE before falling back to the near-miss rule.
+                try:
+                    payload = json.loads(_balanced_json(body))
+                except ValueError:
+                    continue  # genuinely malformed: left in prose
             pair = _arguments_of(payload)
             if pair is None:
                 continue
