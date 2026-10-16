@@ -490,46 +490,86 @@ class Workspace:
         form shape refuses cleanly rather than hanging a headless run.
         """
         # -- normalize the two shapes into one form spec -------------
+        # Models mix shapes three ways, and no branch should strand
+        # another's good data (the operator's question still gets
+        # asked):
+        #   - junk `items` (single-key dicts like {"Red": "Red"}) with
+        #     a good flat `options` alongside -> build from `options`;
+        #   - good fields buried IN the junk items -> keep them, and
+        #     salvage the junk dicts' values as choice options;
+        #   - field dicts stuffed in the legacy `options` array
+        #     (1ff4968) -> lift each into a real field.
+        shape: str | None = None
+        form: Any = None
         if items is not None:
             form = _normalize_form(items)
-            if isinstance(form, str):
-                return ToolResult(False, form)
-            shape = "form"
-        elif options:
-            # A model sometimes stuffs FIELD dicts into the legacy
-            # options array (it learned "ask a structured question"
-            # but not the items shape). Dicts here are read as
-            # items-in-disguise: {"key"/"label"/"options"/...} each
-            # become a real field, so the operator gets a proper form
-            # instead of a choice list of stringified JSON blobs.
-            if any(isinstance(o, dict) for o in options):
-                lifted = [o for o in options if isinstance(o, dict)]
-                strings = [str(o) for o in options
-                           if not isinstance(o, dict)]
-                lifted_items: list[dict[str, Any]] = [
-                    {**o, "type": o.get("type") or "text"}
-                    for o in lifted]
-                if strings:  # stray plain options stay choosable
-                    lifted_items.insert(0, {
+            if not isinstance(form, str):
+                shape = "form"
+        if shape is None and items is not None:
+            # _normalize_form refused: split good fields from junk.
+            good: list[dict[str, Any]] = []
+            junk_values: list[str] = []
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                trial = _normalize_form([raw])
+                if not isinstance(trial, str):
+                    good.extend(trial)
+                elif (len(raw) == 1
+                        and isinstance(next(iter(raw.values()), None), str)):
+                    junk_values.append(str(next(iter(raw.values()))))
+            if good or junk_values:
+                fields: list[dict[str, Any]] = list(good)
+                # An explicitly-passed flat `options` array outranks
+                # salvage from junk items: it is the model's own
+                # deliberate list (and carries the defaults).
+                choice_pool = list(options or []) or junk_values
+                if choice_pool:
+                    fields.insert(0, {
                         "type": "choice", "key": "answer",
-                        "label": prompt, "options": strings,
+                        "label": prompt,
+                        "options": [str(o) for o in choice_pool],
                         "multiple": allow_multiple,
                         "defaults": list(default_selected or []),
                     })
-                form = _normalize_form(lifted_items)
-                if isinstance(form, str):
-                    return ToolResult(False, form)
+                if fields:
+                    form = fields
+                    shape = "form"
+        if shape is None:
+            if options:
+                if any(isinstance(o, dict) for o in options):
+                    # field dicts stuffed in the legacy options array
+                    # (1ff4968): each becomes a real field
+                    lifted = [o for o in options if isinstance(o, dict)]
+                    strings = [str(o) for o in options
+                               if not isinstance(o, dict)]
+                    lifted_items: list[dict[str, Any]] = [
+                        {**o, "type": o.get("type") or "text"}
+                        for o in lifted]
+                    if strings:  # stray plain options stay choosable
+                        lifted_items.insert(0, {
+                            "type": "choice", "key": "answer",
+                            "label": prompt, "options": strings,
+                            "multiple": allow_multiple,
+                            "defaults": list(default_selected or []),
+                        })
+                    form = _normalize_form(lifted_items)
+                    if isinstance(form, str):
+                        return ToolResult(False, form)
+                else:
+                    form = [{
+                        "type": "choice", "key": "answer", "label": prompt,
+                        "options": list(options),
+                        "multiple": allow_multiple,
+                        "defaults": list(default_selected or []),
+                    }]
+                shape = "form"
+            elif items is None:
+                return ToolResult(
+                    False, "ask_user_choice needs options or items")
             else:
-                form = [{
-                    "type": "choice", "key": "answer", "label": prompt,
-                    "options": list(options),
-                    "multiple": allow_multiple,
-                    "defaults": list(default_selected or []),
-                }]
-            shape = "form"
-        else:
-            return ToolResult(
-                False, "ask_user_choice needs options or items")
+                # items existed but nothing in them was salvageable
+                return ToolResult(False, str(form))
 
         # -- the UI contract: the session forwards to the bound front end.
         # NotImplemented means NO front end can ask (headless, plain

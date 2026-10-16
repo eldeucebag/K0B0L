@@ -222,6 +222,64 @@ check("near_miss_tool_name accepts a valid call's name",
       near_miss_tool_name('```tool\n{"name": "read_file", "arguments": {}}\n```')
       == "read_file")
 
+# -- mixed-shape salvage (the "didn't work" follow-up) ----------------------
+# Live case: the model passed flat options AND a junk items array of
+# single-key dicts ({'Red': 'Red'}). The items branch ran first, the
+# call errored ("item 0 needs a label or key"), and the popup never
+# opened -- with a perfectly good options list sitting right there.
+class _FormRecorder:
+    def __init__(self):
+        self.specs: list = []
+
+    def ask_form(self, spec):
+        self.specs.append(spec)
+        return {"answer": ["Blue"]}
+
+
+def _salvage_ws():
+    ui = _FormRecorder()
+    ws = Workspace((SCRATCH / "salvage").as_posix(), ui=ui)
+    return ws, ui
+
+
+ws_salv, ui_salv = _salvage_ws()
+res = ws_salv.call("ask_user_choice", {
+    "prompt": "colors?",
+    "options": ["Red", "Blue", "Green", "Yellow", "Other"],
+    "allow_multiple": True, "default_selected": ["Blue"],
+    "items": [{"Red": "Red"}, {"Blue": "Blue"},
+              {"Green": "Green"}, {"Yellow": "Yellow"}]})
+check("mixed junk-items + flat options opens the form", res.ok, res.text[:80])
+check("the explicit options list wins over the junk values",
+      ui_salv.specs and ui_salv.specs[0]["items"][0]["options"]
+      == ["Red", "Blue", "Green", "Yellow", "Other"],
+      str(ui_salv.specs[0]["items"][:1]) if ui_salv.specs else "(no form)")
+check("defaults survive the salvage",
+      ui_salv.specs and ui_salv.specs[0]["items"][0]["defaults"] == ["Blue"])
+
+ws_junk, ui_junk = _salvage_ws()
+res = ws_junk.call("ask_user_choice",
+                   {"prompt": "pick", "items": [{"Red": "Red"},
+                                                 {"Blue": "Blue"}]})
+check("junk-only items salvage their values as options", res.ok, res.text[:60])
+check("salvaged values become the choice list",
+      ui_junk.specs and ui_junk.specs[0]["items"][0]["options"]
+      == ["Red", "Blue"])
+
+ws_mix, ui_mix = _salvage_ws()
+res = ws_mix.call("ask_user_choice", {"prompt": "p", "items": [
+    {"Red": "Red"},
+    {"type": "choice", "key": "shape", "options": ["round", "square"]}]})
+check("a good field buried in junk items is kept",
+      res.ok and any(i["key"] == "shape" for i in ui_mix.specs[0]["items"]),
+      res.text[:80])
+
+ws_bad, _ = _salvage_ws()
+res = ws_bad.call("ask_user_choice", {"prompt": "p",
+                                      "items": [{"x": 1}, {"y": 2}]})
+check("truly unsalvageable items still error honestly",
+      not res.ok and "label or key" in res.text, res.text[:60])
+
 print()
 if fails:
     print(f"{len(fails)} failure(s):")
