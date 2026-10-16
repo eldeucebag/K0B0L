@@ -458,19 +458,86 @@ class Workspace:
     def ask_user_choice(
         self,
         prompt: str,
-        options: list[str],
+        options: list[str] | None = None,
         *,
         allow_multiple: bool = False,
         default_selected: list[str] | None = None,
+        items: list[dict[str, Any]] | None = None,
     ) -> ToolResult:
-        """Ask the operator to pick from a list of options.
+        """Ask the operator to answer a structured form.
 
-        Blocks the turn until the operator answers. The picker is a modal the
-        Textual front end owns, so this needs the real UI: with no app bound
-        (plain front end, scripted session) it returns an error rather than
-        waiting on a screen that can never appear. The operator's answer comes
-        back as a JSON list of the chosen option strings.
+        Blocks the turn until the operator answers. Two shapes:
+
+        - Legacy: ``options`` is a flat list of strings (optionally
+          ``allow_multiple`` / ``default_selected``). Chosen for every
+          existing call site; the answer is a JSON list of strings.
+        - Form: ``items`` is an ordered list of field dicts -- choices
+          and free-text inputs, nestable via group dicts::
+
+              items=[{"type": "group", "label": "...", "items": [...]},
+                     {"type": "choice", "label": "...", "options": [...],
+                      "multiple": True, "defaults": [...]},
+                     {"type": "text", "label": "...", "placeholder": "..."}]
+
+          The answer is a JSON object keyed by each field's ``key``
+          (or its label when absent): choices -> list of chosen option
+          strings, text -> the typed string, group -> a nested object.
+
+        The UI is front-end specific: the workspace's ``_ui`` (the
+        ChatSession) is asked first for an ``ask_form`` hook, so the
+        webui and the Textual chat can render real dialogs; without a
+        hook, the legacy Textual picker handles flat choices and the
+        form shape refuses cleanly rather than hanging a headless run.
         """
+        # -- normalize the two shapes into one form spec -------------
+        if items is not None:
+            form = _normalize_form(items)
+            if isinstance(form, str):
+                return ToolResult(False, form)
+            shape = "form"
+        elif options:
+            form = [{
+                "type": "choice", "key": "answer", "label": prompt,
+                "options": list(options), "multiple": allow_multiple,
+                "defaults": list(default_selected or []),
+            }]
+            shape = "form"
+        else:
+            return ToolResult(
+                False, "ask_user_choice needs options or items")
+
+        # -- the UI contract: the session forwards to the bound front end.
+        # NotImplemented means NO front end can ask (headless, plain
+        # mode) -- fall through to the legacy paths. None means a real
+        # form UI opened and the operator genuinely cancelled.
+        ask_form = getattr(self._ui, "ask_form", None)
+        if callable(ask_form):
+            try:
+                answer = ask_form({"prompt": prompt, "items": form})
+            except Exception as exc:  # noqa: BLE001
+                return ToolResult(False, f"could not open the form: {exc}")
+            if answer is NotImplemented:
+                pass  # no form-capable UI; the legacy paths below handle it
+            else:
+                if answer is None:
+                    return ToolResult(
+                        False, "the operator cancelled the form")
+                if shape == "form" and items is None:
+                    # a legacy flat call through the form path: the
+                    # answer object's single value is the list the
+                    # model expects
+                    vals = list(answer.values())
+                    return ToolResult(True, json.dumps(
+                        vals[0] if vals else []))
+                return ToolResult(True, json.dumps(answer))
+
+        # -- no form-capable UI: legacy picker for the flat shape -----
+        if items is not None:
+            return ToolResult(
+                False,
+                "structured forms need an interactive front end "
+                "(web or Textual chat); use flat options here",
+            )
         # Imported here, not at module level: textual_chat imports this module
         # (ToolResult), so a module-level import is circular and silently
         # degrades to None when tools.py loads first -- which is the order the
@@ -936,6 +1003,69 @@ class Workspace:
         return ToolResult(True, "\n\n".join(parts))
 
 
+def _normalize_form(items: Any, _depth: int = 0) -> list[dict[str, Any]] | str:
+    """Validate and normalize an ``ask_user_choice`` items spec.
+
+    Returns the normalized list, or a one-line error string. Nesting
+    is group dicts recursing into ``items``; the depth cap keeps a
+    hostile/self-referential structure from recursing forever. Every
+    field gets a ``key`` (explicit or derived from its label) and a
+    stable ``id`` so front ends can wire inputs unambiguously.
+    """
+    if _depth > 8:
+        return "form items nest too deeply (max 8 levels)"
+    if not isinstance(items, list) or not items:
+        return "items must be a non-empty list"
+    out: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for n, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            return f"item {n} is not an object"
+        kind = str(raw.get("type") or "").lower()
+        label = str(raw.get("label") or "").strip()
+        key = str(raw.get("key") or "").strip() or label
+        if not key:
+            return f"item {n} needs a label or key"
+        base = key
+        while key in seen_keys:
+            key = f"{base}-{n}"
+        seen_keys.add(key)
+        if kind == "group":
+            inner = _normalize_form(raw.get("items"), _depth + 1)
+            if isinstance(inner, str):
+                return f"group {key!r}: {inner}"
+            out.append({"type": "group", "key": key, "label": label,
+                        "items": inner})
+        elif kind == "choice":
+            opts = raw.get("options")
+            if not isinstance(opts, list) or not opts \
+                    or not all(isinstance(o, (str, int, float))
+                               for o in opts):
+                return f"choice {key!r}: options must be a non-empty list"
+            defaults = raw.get("defaults") or raw.get("default_selected")
+            if isinstance(defaults, (str, int, float)):
+                defaults = [defaults]
+            if not isinstance(defaults, list):
+                defaults = []
+            out.append({
+                "type": "choice", "key": key, "label": label,
+                "options": [str(o) for o in opts],
+                "multiple": bool(raw.get("multiple")
+                                 or raw.get("allow_multiple")),
+                "defaults": [str(d) for d in defaults],
+            })
+        elif kind == "text":
+            out.append({
+                "type": "text", "key": key, "label": label,
+                "placeholder": str(raw.get("placeholder") or ""),
+                "default": str(raw.get("default") or ""),
+            })
+        else:
+            return (f"item {n} ({key!r}): type must be "
+                    "choice | text | group")
+    return out
+
+
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict:
     return {
         "type": "function",
@@ -1017,7 +1147,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _schema(
         "ask_user_choice",
-        "Ask the operator to pick from a list of options. Returns the chosen option(s) as a JSON list.",
+        "Ask the operator to answer a form: single or multi choice, free-text "
+        "inputs, and nested groups -- all in order. Returns the answer as JSON "
+        "(flat legacy calls: a JSON list of chosen options; form calls: an "
+        "object keyed by each item's key or label).",
         {
             "prompt": {
                 "type": "string",
@@ -1026,20 +1159,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "options": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "The list of options to choose from",
+                "description": "Simple shape: a flat list of options to choose from",
             },
             "allow_multiple": {
                 "type": "boolean",
-                "description": "Whether the operator may select multiple options",
+                "description": "With the flat options shape: whether several may be selected",
                 "default": False,
             },
             "default_selected": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Pre-selected options (for allow_multiple=true)",
+                "description": "With the flat options shape: pre-selected options",
+            },
+            "items": {
+                "type": "array",
+                "description": "Structured form shape: an ordered list of "
+                    '{"type":"choice","key":"...","label":"...","options":[...],'
+                    '"multiple":bool,"defaults":[...]}, '
+                    '{"type":"text","key":"...","label":"...","placeholder":"..."}, '
+                    'or {"type":"group","label":"...","items":[... nesting ...]}. '
+                    "Every non-group item is answered; groups answer as nested "
+                    "objects. key defaults to the label.",
             },
         },
-        ["prompt", "options"],
+        ["prompt"],
     ),
     _schema(
         "remember",
@@ -1231,7 +1374,16 @@ TEXT_CALL_RE = re.compile(r"```(?:tool|tool_call|json)?\s*(\{.*?\})\s*```", re.D
 #: Some models spell tool calls the way their own training did rather than the
 #: way the protocol prompt asks. Both spellings name a real tool with real
 #: arguments or they are ignored, so accepting the tag form costs nothing.
-TAG_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+TAG_CALL_RE = re.compile(r"<\|tool_call\|>\s*(\{.*?\})\s*<\|/tool_call\|>", re.DOTALL)
+
+#: Abliterated Gemma's own dialect: ``<|tool_call|>call:name{args}`` with no
+#: JSON object and no closing tag. The arguments are brace-quoted with
+#: ``<|"|>`` for quotes; the engine normalizes them into JSON so the
+#: call parses the same as every other spelling.
+TAG_CALL_NAME_RE = re.compile(
+    r"<\|tool_call\|>\s*call:\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*?\})?\s*(?:<\|/tool_call\|>|$)",
+    re.DOTALL,
+)
 
 
 def text_protocol_prompt(include_info: bool = False) -> str:
@@ -1249,6 +1401,60 @@ def text_protocol_prompt(include_info: bool = False) -> str:
     return TEXT_TOOL_PROTOCOL.replace(TOOLS_PLACEHOLDER, "\n".join(lines))
 
 
+def _parse_marker_args(body: str) -> dict[str, Any]:
+    """The Gemma ``call:name{...}`` dialect: JSON when the model wrote
+    real JSON, else a shallow key:value scan. Supports the shapes the
+    tool schemas use: scalars, quoted strings, flat lists, and lists of
+    flat objects (one level). Returns {} when the body cannot be read
+    that way -- the near-miss rule then drops the call rather than
+    running a tool on guessed arguments."""
+    out: dict[str, Any] = {}
+
+    def scalar(tok: str) -> Any:
+        tok = tok.strip().rstrip(",").strip()
+        if not tok:
+            return ""
+        if tok.startswith('"') and tok.endswith('"') and len(tok) > 1:
+            return tok[1:-1]
+        if tok in ("true", "false"):
+            return tok == "true"
+        try:
+            return int(tok)
+        except ValueError:
+            try:
+                return float(tok)
+            except ValueError:
+                return tok
+
+    for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*', body):
+        key = m.group(1)
+        rest = body[m.end():]
+        # list of objects: [{k: v, ...}, ...]
+        if rest.lstrip().startswith("["):
+            inner = rest.strip()
+            items: list[Any] = []
+            for om in re.finditer(r"\{([^{}]*)\}", inner):
+                obj = _parse_marker_args(om.group(1))
+                if obj:
+                    items.append(obj)
+            if items:
+                out.setdefault(key, items)
+                continue
+            # flat list: [a, b, c]
+            lm = re.match(r"\[([^\[\]]*)\]", inner)
+            if lm:
+                vals = [scalar(t) for t in lm.group(1).split(",")
+                        if t.strip()]
+                if vals:
+                    out.setdefault(key, vals)
+                continue
+        # scalar / quoted string: take up to the next top-level comma
+        sm = re.match(r'\s*("[^"]*"|[^,}\]]+)', rest)
+        if sm:
+            out.setdefault(key, scalar(sm.group(1)))
+    return out
+
+
 def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
     """Split model output into visible prose and text-protocol tool calls.
 
@@ -1262,7 +1468,31 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
     matches = [
         match for pattern in (TEXT_CALL_RE, TAG_CALL_RE) for match in pattern.finditer(text)
     ]
-    matches.sort(key=lambda found: found.start())
+    # The name-dialect matches carry the tool name in the tag itself
+    # (Gemma: <|tool_call|>call:name{args}); normalize their shape
+    # into (name, arguments-dict) up front so the loop below is uniform.
+    named: list[tuple[Any, str, dict[str, Any]]] = []
+    for match in TAG_CALL_NAME_RE.finditer(text):
+        name = match.group(1)
+        if name not in known:
+            continue
+        raw_args = match.group(2) or ""
+        # Gemma quotes with <|"|> and drops key quotes entirely:
+        # {path:<|"|>a.txt<|"|>}. Normalize the markers, then parse
+        # tolerantly: real JSON when the model wrote it, else a
+        # key:value scan (top level and one list/object level deep --
+        # the shapes the tool schemas use). Anything the scan cannot
+        # express stays a near-miss and the call is dropped.
+        cleaned = raw_args.replace('<|"|>', '"')
+        arguments: dict[str, Any] = {}
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                arguments = parsed
+        except ValueError:
+            arguments = _parse_marker_args(cleaned)
+        named.append((match, name, arguments))
+        spans.append((match.start(), match.end()))
     for match in matches:
         try:
             payload = json.loads(match.group(1))
@@ -1285,6 +1515,8 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
             continue
         calls.append((name, arguments))
         spans.append((match.start(), match.end()))
+    for match, name, arguments in named:
+        calls.append((name, arguments))
 
     prose = text
     for start, end in reversed(spans):

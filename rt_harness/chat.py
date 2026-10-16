@@ -1016,6 +1016,29 @@ class ChatSession:
             except Exception:  # noqa: BLE001 - a render failure must not lose the file
                 pass
 
+    def ask_form(self, spec: dict[str, Any]) -> Any:
+        """A structured operator question (ask_user_choice): forward to
+        the bound front end, if any. The workspace holds this session as
+        ``ui``, so the tool's lookup lands here -- the hooks decide what
+        asking means: the web renders the form dialog and blocks the
+        tool until the operator answers (WebChat's hook runs on the
+        executor thread and waits on an event the socket handler sets).
+
+        Returns NotImplemented when NO front end can ask -- the tool
+        then falls through to its legacy/no-UI paths instead of reading
+        a missing UI as "the operator cancelled". None (from a real
+        form UI) means a genuine cancel.
+        """
+        ask = getattr(self.hooks, "ask_form", None)
+        if not callable(ask):
+            return NotImplemented
+        try:
+            return ask(spec)
+        except NotImplementedError:
+            return NotImplemented
+        except Exception:  # noqa: BLE001 - a broken UI must not wedge the turn
+            return NotImplemented
+
     def gen_progress(self, phase: str, step: int = 0, total: int = 0) -> None:
         """Forward generation progress to the bound front end, if any.
 

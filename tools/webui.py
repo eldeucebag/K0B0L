@@ -400,6 +400,32 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   z-index: 60; pointer-events: none;
 }
+.form-fields { display: flex; flex-direction: column; gap: 12px;
+  max-height: 60vh; overflow-y: auto; min-width: 46vw; }
+.form-group { border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+.form-group-label { font-size: 11px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--faint); }
+.form-field label { display: block; font-size: 12.5px;
+  color: var(--muted); margin-bottom: 4px; }
+.form-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.form-opt { background: var(--band); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.form-opt.sel { color: var(--accent); border-color: var(--accent); }
+.form-text { background: var(--bg); color: var(--ink);
+  border: 1px solid #242c3d; border-radius: 8px; padding: 8px 10px;
+  font: 13px/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
+  width: 100%; box-sizing: border-box; }
+.form-text:focus { outline: none; border-color: var(--accent); }
+#form-dialog .opt-actions { margin-top: 12px; display: flex; gap: 8px;
+  justify-content: flex-end; }
+#form-send { background: var(--accent); color: var(--accent-ink);
+  border: 0; border-radius: 8px; padding: 6px 18px; font-weight: 600;
+  cursor: pointer; }
+#form-cancel { background: none; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px;
+  cursor: pointer; }
 .toast {
   background: var(--surface); color: var(--ink);
   border: 1px solid var(--border); border-radius: 8px;
@@ -570,6 +596,14 @@ dialog button.primary:hover { color: var(--accent-ink); }
 </form>
 <div id="overlay" hidden></div>
 <div id="toast-host"></div>
+<dialog id="form-dialog">
+  <h3 id="form-title">a question for you</h3>
+  <div id="form-fields" class="form-fields"></div>
+  <div class="opt-actions">
+    <button id="form-cancel">cancel</button>
+    <button id="form-send" class="primary">answer</button>
+  </div>
+</dialog>
 <dialog id="image-dialog">
   <h3>generate an image</h3>
   <div class="img-tabs">
@@ -1465,6 +1499,11 @@ function wireSocket() {
     case "session_list":
       renderSessionList(m.sessions || []);
       break;
+    case "ask_form":
+      // the model asked the operator to fill a form: a modal dialog
+      // opens on every tab; answering sends form_answer (any tab).
+      openAskForm(m);
+      break;
     case "skills":
       renderSkills(m.skills || [], m.active || []);
       break;
@@ -2149,10 +2188,112 @@ document.getElementById("skill-delete").addEventListener("click", () => {
   ws.send(JSON.stringify({ skills_delete: { name: skillEdit.name } }));
   skillStatus("deleting " + skillEdit.name + "...");
 });
-document.getElementById("skills-btn").addEventListener("click", openSkills);
+// -- ask_user_choice dialog: structured forms over the socket ----------
+const formDialog = document.getElementById("form-dialog");
+const formFields = document.getElementById("form-fields");
+
+// Build one field (or group) into `host`; every control records its
+// answer into `values` under the item's key. Groups recurse; a group
+// answers as a nested object. No innerHTML anywhere below: the spec
+// is model-authored, so every string lands through textContent.
+function buildFormField(item, values, host) {
+  if (item.type === "group") {
+    const group = document.createElement("div");
+    group.className = "form-group";
+    if (item.label) {
+      const gl = document.createElement("div");
+      gl.className = "form-group-label";
+      gl.textContent = item.label;
+      group.appendChild(gl);
+    }
+    const inner = {};
+    values[item.key] = inner;
+    for (const child of item.items || []) {
+      buildFormField(child, inner, group);
+    }
+    host.appendChild(group);
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "form-field";
+  const label = document.createElement("label");
+  label.textContent = item.label || item.key;
+  wrap.appendChild(label);
+  if (item.type === "text") {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "form-text";
+    input.placeholder = item.placeholder || "";
+    input.value = item.default || "";
+    values[item.key] = item.default || "";
+    input.addEventListener("input", () => { values[item.key] = input.value; });
+    wrap.appendChild(input);
+  } else {  // choice
+    const chosen = (item.defaults || []).slice();
+    values[item.key] = chosen;
+    const opts = document.createElement("div");
+    opts.className = "form-opts";
+    for (const opt of item.options || []) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "form-opt" +
+        (chosen.includes(opt) ? " sel" : "");
+      chip.textContent = opt;
+      chip.addEventListener("click", () => {
+        const at = chosen.indexOf(opt);
+        if (item.multiple) {
+          if (at >= 0) { chosen.splice(at, 1); }
+          else { chosen.push(opt); }
+          chip.classList.toggle("sel", chosen.includes(opt));
+        } else {
+          chosen.length = 0;
+          chosen.push(opt);
+          for (const other of opts.children) {
+            other.classList.toggle("sel", other === chip);
+          }
+        }
+      });
+      opts.appendChild(chip);
+    }
+    wrap.appendChild(opts);
+  }
+  host.appendChild(wrap);
+}
+
+// Answer from the LIVE values object (every control writes into it as
+// it changes; the dataset snapshot is only the initial state).
+function sendFormAnswer(values) {
+  formDialog.close();
+  try {
+    ws.send(JSON.stringify({ form_answer: { values: values } }));
+  } catch (err) { /* dead socket: the wait times out server-side */ }
+}
+document.getElementById("form-send").addEventListener("click", () => {
+  if (formDialog._values) {
+    sendFormAnswer(formDialog._values);
+  }
+});
+document.getElementById("form-cancel").addEventListener("click", () => {
+  sendFormAnswer(null);
+});
+
+function openAskForm(m) {
+  document.getElementById("form-title").textContent =
+    m.prompt || "a question for you";
+  formFields.innerHTML = "";
+  const values = {};
+  for (const item of m.items || []) {
+    buildFormField(item, values, formFields);
+  }
+  formDialog._values = values;
+  formDialog.showModal();
+  const firstText = formFields.querySelector(".form-text");
+  if (firstText) firstText.focus();
+}
 document.getElementById("skills-close").addEventListener("click", () => {
   document.getElementById("skills-dialog").close();
 });
+document.getElementById("skills-btn").addEventListener("click", openSkills);
 
 // Paint the cached copy immediately; the server's restored history
 // clears and repaints it when the socket connects. The cache is the
@@ -2266,8 +2407,37 @@ class WebChat(ChatUI):
         self._own_run = False
 
     def set_gen_log(self, log: list[dict[str, Any]] | None) -> None:
-        """Attach the active run's replay log (None when no run)."""
+        """Attach this run's replay log (the socket handler calls it
+        around model-initiated image runs)."""
         self._gen_log = log
+
+    # -- ask_user_choice bridge: executor <-> page dialog -----------------
+    def ask_form(self, spec: dict[str, Any]) -> dict[str, Any] | None:
+        """Render a structured form on every tab and block for the
+        answer. Called on the EXECUTOR thread by the tool, so the
+        frames go out through the normal _frame path and the wait is a
+        threading.Event -- never an await.
+
+        The answer arrives as a ``form_answer`` socket message; the
+        handler stores it and sets the event. A dialog Cancel answers
+        None, which the tool turns into "the operator cancelled".
+        """
+        import threading
+
+        done = threading.Event()
+        holder: dict[str, Any] = {}
+        self._form_wait = (done, holder)
+        # the frame carries the whole spec; the page builds the dialog
+        self._frame({"kind": "ask_form", "prompt": spec.get("prompt", ""),
+                     "items": spec.get("items", [])})
+        # One turn blocks here up to 10 minutes; the operator may be
+        # thinking. A vanished page is covered by the timeout -- the
+        # tool reports honestly rather than wedging the turn forever.
+        if not done.wait(timeout=600):
+            self._form_wait = None
+            raise TimeoutError("no form answer within 600s")
+        self._form_wait = None
+        return holder.get("answer")
 
     def set_relay(self, publisher) -> None:
         """While an engine-path run is active, this WebChat's frames are
@@ -2952,8 +3122,11 @@ def main() -> int:
     async def send_pub(frame: dict[str, Any]) -> None:
         """Publish to every live socket AND into the history log: the
         log is the server-side transcript; every connect replays it.
-        Dead sockets are dropped, never fatal."""
-        if frame.get("kind") != "pong":
+        Dead sockets are dropped, never fatal. ask_form frames are the
+        one exception to the log: a stale form popping open on every
+        page refresh would re-ask a question the operator answered."""
+        kind = frame.get("kind")
+        if kind != "pong" and kind != "ask_form":
             HISTORY.append(dict(frame))
             if len(HISTORY) > HISTORY_CAP:
                 del HISTORY[0:len(HISTORY) - HISTORY_CAP]
@@ -4128,6 +4301,24 @@ def main() -> int:
                 # op dispatched after `if not text: continue` is silently
                 # swallowed, exactly the class that killed every panel
                 # button when sessions shipped).
+                # A form answer from the ask_user_choice dialog: the
+                # executor thread is blocked in ask_form waiting on the
+                # event. Before the empty-text guard like every op
+                # verb. A late/second answer when nobody is waiting is
+                # ignored (the wait may have timed out already).
+                if isinstance(message.get("form_answer"), dict):
+                    wait = getattr(ui, "_form_wait", None)
+                    if wait is not None:
+                        done, holder = wait
+                        holder["answer"] = message["form_answer"].get(
+                            "values") or None
+                        done.set()
+                    else:
+                        await websocket.send_json({
+                            "kind": "notice",
+                            "text": "no form is waiting "
+                                    "(it may have timed out)"})
+                    continue
                 if message.get("cancel") is True:
                     if current_task["task"] is not None and \
                             not current_task["task"].done():

@@ -529,7 +529,20 @@ class OpenAIClient:
                 for schema in tools
             ]
         if think is not None:
-            payload["reasoning"] = {"effort": "medium"} if think else None
+            # False must SUPPRESS reasoning, not fall back to the
+            # template default: this endpoint strips None payloads, so a
+            # think=False that sent nothing left the model's own
+            # reasoning default in force (Gemma kept thinking through
+            # /reason off). Send both knobs servers understand:
+            # effort:none for reasoning-aware builds, and llama.cpp's
+            # enable_thinking template kwarg for Gemma/Qwen3-style
+            # templates. Both present is harmless: each build ignores
+            # the one it does not know.
+            if think:
+                payload["reasoning"] = {"effort": "medium"}
+            else:
+                payload["reasoning"] = {"effort": "none"}
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
         payload = {k: v for k, v in payload.items() if v is not None}
 
         with self._request("/chat/completions", payload, stream=True) as response:
