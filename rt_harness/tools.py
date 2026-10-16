@@ -496,11 +496,36 @@ class Workspace:
                 return ToolResult(False, form)
             shape = "form"
         elif options:
-            form = [{
-                "type": "choice", "key": "answer", "label": prompt,
-                "options": list(options), "multiple": allow_multiple,
-                "defaults": list(default_selected or []),
-            }]
+            # A model sometimes stuffs FIELD dicts into the legacy
+            # options array (it learned "ask a structured question"
+            # but not the items shape). Dicts here are read as
+            # items-in-disguise: {"key"/"label"/"options"/...} each
+            # become a real field, so the operator gets a proper form
+            # instead of a choice list of stringified JSON blobs.
+            if any(isinstance(o, dict) for o in options):
+                lifted = [o for o in options if isinstance(o, dict)]
+                strings = [str(o) for o in options
+                           if not isinstance(o, dict)]
+                lifted_items: list[dict[str, Any]] = [
+                    {**o, "type": o.get("type") or "text"}
+                    for o in lifted]
+                if strings:  # stray plain options stay choosable
+                    lifted_items.insert(0, {
+                        "type": "choice", "key": "answer",
+                        "label": prompt, "options": strings,
+                        "multiple": allow_multiple,
+                        "defaults": list(default_selected or []),
+                    })
+                form = _normalize_form(lifted_items)
+                if isinstance(form, str):
+                    return ToolResult(False, form)
+            else:
+                form = [{
+                    "type": "choice", "key": "answer", "label": prompt,
+                    "options": list(options),
+                    "multiple": allow_multiple,
+                    "defaults": list(default_selected or []),
+                }]
             shape = "form"
         else:
             return ToolResult(

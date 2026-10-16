@@ -11,14 +11,21 @@ Image generation is not just describing a picture — it is engineering a latent
 
 ## Gathering the brief
 
-Before expanding anything, make sure you hold all three constraints: the **character** (who), the **scene/theme** (where/what happens), and the **target art style** (the physics of the whole image). If any of them is missing, underspecified, or ambiguous in the operator's message, use the `ask_user_choice` tool ONCE to gather what is missing in a single structured form — never interrogate through multiple back-and-forth messages. Shape it to what is missing:
+Before expanding anything, make sure you hold all three constraints: the **character** (who), the **scene/theme** (where/what happens), and the **target art style** (the physics of the whole image). If any of them is missing, underspecified, or ambiguous, call `ask_user_choice` ONCE with the structured `items` argument — never interrogate through multiple back-and-forth messages. The exact call shape:
 
-- A missing or ambiguous style → a single-choice field offering concrete, distinct style families (e.g. flat cel-shading, painterly baroque, rough ink, photoreal render), with the operator's own words as the default choice.
-- An underspecified character or scene → a text field per missing axis (pose, wardrobe, mood, lighting) with a placeholder naming what you need.
-- Ambiguous composition decisions → a multiple-choice field (camera angle: low dramatic / eye-level / top-down).
-- Group related axes under one group so the form reads as one brief, not a survey.
+```tool
+{"name": "ask_user_choice", "arguments": {"prompt": "the art brief, in one line", "items": [
+  {"type": "choice", "key": "art_style", "label": "Art style", "options": ["flat cel-shading", "painterly baroque", "rough ink", "photoreal render"], "multiple": false},
+  {"type": "text", "key": "character_details", "label": "Character: pose, wardrobe, expression", "placeholder": "e.g. standing, red cloak, wary expression"},
+  {"type": "text", "key": "scene_details", "label": "Scene: setting and action", "placeholder": "e.g. harbor at dusk, unloading crates"},
+  {"type": "group", "key": "composition", "label": "Composition", "items": [
+    {"type": "choice", "key": "camera", "label": "Camera angle", "options": ["low dramatic", "eye-level", "top-down"], "multiple": false},
+    {"type": "choice", "key": "palette", "label": "Palette", "options": ["warm golds", "cold blues", "desaturated"], "multiple": true}
+  ]}
+]}}
+```
 
-Take the operator's answers as binding constraints. If the message already carries all three constraints, skip the form and proceed.
+Rules for the form: use `type: "choice"` with an `options` list when you can name the candidates (style families, camera angles); use `type: "text"` when the answer is free-form (poses, wardrobes, scene specifics) — with a `placeholder` naming what you need; group related axes under `type: "group"`. Drop the fields whose answers you already hold. Never put field dicts into the flat `options` array — that renders as one choice list. Take the operator's answers as binding constraints. If the message already carries all three constraints, skip the form and proceed.
 
 ## The workflow
 
@@ -30,7 +37,7 @@ Take the operator's answers as binding constraints. If the message already carri
 
 ## Iterative refinement
 
-Image synthesis is a feedback loop. If a generated result drifts from the target style, do not just add "more detail." Diagnose the failure: was the line weight wrong? Was the lighting too modern? If the operator's correction is ambiguous, offer ONE ask_user_choice form naming the axes of drift you diagnosed (line weight, palette, lighting era, composition) as multiple-choice options rather than guessing. Adjust the technical specifications and style constraints in the next iteration to explicitly correct the observed drift. Use `remember` to lock in successful style descriptors for the current session.
+Image synthesis is a feedback loop. If a generated result drifts from the target style, do not just add "more detail." Diagnose the failure: was the line weight wrong? Was the lighting too modern? If the operator's correction is ambiguous, offer ONE ask_user_choice form (same `items` shape as above) naming the axes of drift you diagnosed — e.g. `{"type": "choice", "key": "drift_axis", "label": "What drifted?", "options": ["line weight", "palette", "lighting era", "composition"], "multiple": true}` — rather than guessing. Adjust the technical specifications and style constraints in the next iteration to explicitly correct the observed drift. Use `remember` to lock in successful style descriptors for the current session.
 
 ## Ground rules
 
