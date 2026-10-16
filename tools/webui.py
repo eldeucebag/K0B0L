@@ -2562,6 +2562,23 @@ class WebChat(ChatUI):
                     self._frame({"kind": "code", "language": language,
                                  "text": (payload if language else raw)
                                  .strip("\n")})
+                elif language in ("tool", "tool_call"):
+                    # A tool fence whose payload does not parse never
+                    # reached the ⚙ panel (the engine drops near-miss
+                    # calls without running them), so dropping it here
+                    # too would hide the model's ONLY visible trace --
+                    # the exact way a broken ask_user_choice vanished
+                    # with no error anywhere. Show it as code instead.
+                    from rt_harness.tools import _balanced_json
+                    body = payload.strip()
+                    try:
+                        json.loads(body)
+                    except ValueError:
+                        try:
+                            json.loads(_balanced_json(body))
+                        except ValueError:
+                            self._frame({"kind": "code", "language": "tool",
+                                         "text": body})
                 self._fence_open = False
                 self._fence_raw = ""
 

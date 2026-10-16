@@ -1408,32 +1408,63 @@ TEXT_CALL_RE = re.compile(r"```(?:tool|tool_call|json)?\s*(\{.*?\})\s*```", re.D
 def _balanced_json(body: str) -> str:
     """A brace-balanced version of ``body``: scans left to right
     tracking string state and the depth of braces AND brackets
-    separately, appending the closers a truncated body is missing
-    (innermost-first). Returns the input when it already balances."""
+    separately. Two repairs, in the order they are encountered:
+
+    - a TRUNCATED body gets the missing closers appended
+      (innermost-first);
+    - a MISMATCHED closer (a ``}`` where an array's ``]`` is due, the
+      exact slip a small model makes in a deeply nested ``items``
+      form) is coerced to the closer the innermost open bracket
+      actually wants, and the scan continues from it.
+
+    Returns the input when it already balances. A closer with no
+    matching opener at all is left alone -- at that point the body is
+    not arithmetic-slip JSON but genuinely miswritten, and the
+    near-miss rule must still show it.
+    """
     stack: list[str] = []
+    out: list[str] = []
     in_str = False
     esc = False
     for ch in body:
         if esc:
+            out.append(ch)
             esc = False
             continue
         if ch == "\\":
+            out.append(ch)
             esc = True
             continue
         if ch == '"':
+            out.append(ch)
             in_str = not in_str
             continue
         if in_str:
+            out.append(ch)
             continue
         if ch in "{[":
             stack.append(ch)
+            out.append(ch)
         elif ch in "}]":
             if stack and ((ch == "}" and stack[-1] == "{")
                           or (ch == "]" and stack[-1] == "[")):
                 stack.pop()
+                out.append(ch)
+            elif stack:
+                # Mismatched closer: coerce to what the innermost
+                # OPEN bracket wants. A '}' against an open '[' is
+                # the classic slip in nested items forms; rewriting
+                # it to ']' is what makes the body parseable.
+                want = "}" if stack[-1] == "{" else "]"
+                stack.pop()
+                out.append(want)
+            else:
+                out.append(ch)  # unmatched: leave it, genuinely malformed
+        else:
+            out.append(ch)
     if not stack:
-        return body
-    return body + "".join(
+        return "".join(out)
+    return "".join(out) + "".join(
         "}" if opener == "{" else "]" for opener in reversed(stack))
 
 #: Some models spell tool calls the way their own training did rather than the
@@ -1540,6 +1571,52 @@ def _parse_marker_args(body: str) -> dict[str, Any]:
             out.setdefault(key, scalar(sm.group(1)))
             pos = m.end() + sm.end()
     return out
+
+
+#: The fence bodies the live session actually produced when a small
+#: model tried the deep ``items`` form: every near-miss below was a
+#: real dropped ask_user_choice, invisible to the operator. The helper
+#: below names the tool a near-miss block INTENDED to call, so the
+#: engine can ask for a re-issue instead of ending the turn silently.
+def near_miss_tool_name(text: str,
+                        extra_names: tuple[str, ...] = ()) -> str | None:
+    """The tool name a malformed fenced call was aiming at, or None.
+
+    The same spelling acceptance as ``parse_text_calls`` (fenced JSON
+    and both tag forms), but for bodies whose JSON does NOT parse even
+    after re-balancing -- the dropped-call case. A block that names a
+    real tool is intent the engine can recover with one retry; a block
+    that does not is left to the near-miss prose rule as before.
+    """
+    known = TOOL_NAMES + tuple(extra_names)
+    for pattern in (TEXT_CALL_RE, TAG_CALL_RE):
+        for match in pattern.finditer(text):
+            payload = None
+            try:
+                payload = json.loads(match.group(1))
+            except ValueError:
+                try:
+                    payload = json.loads(_balanced_json(match.group(1)))
+                except ValueError:
+                    payload = None
+            if isinstance(payload, dict):
+                name = payload.get("name") or payload.get("tool")
+                if isinstance(name, str) and name in known:
+                    return name
+                return None  # parses but names nothing real
+            # The body will not parse at all -- but the INTENDED tool is
+            # still readable when the model spelled the name field
+            # correctly. A fenced block naming a real tool is a dropped
+            # call the operator deserves to hear about.
+            name_match = re.search(
+                r'"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"', match.group(1))
+            if name_match and name_match.group(1) in known:
+                return name_match.group(1)
+    for match in TAG_CALL_NAME_RE.finditer(text):
+        name = match.group(1)
+        if name in known:
+            return name
+    return None
 
 
 def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str, list[tuple[str, dict[str, Any]]]]:

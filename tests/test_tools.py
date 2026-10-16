@@ -16,6 +16,8 @@ from rt_harness.tools import (  # noqa: E402
     TOOL_VERBOSITY,
     ToolError,
     Workspace,
+    _balanced_json,
+    near_miss_tool_name,
     normalize_arguments,
     parse_text_calls,
     summarize_call,
@@ -176,6 +178,49 @@ _, calls = parse_text_calls('{"name": "rm_rf", "arguments": {}}')
 check("a call to a non-existent tool is ignored", calls == [], str(calls))
 _, calls = parse_text_calls('{"name": "write_file", "arguments": {"path": "a", "content": "b"}}')
 check("bare (unfenced) JSON is not executed as a tool call", calls == [], str(calls))
+
+# -- malformed-call repair (the dropped ask_user_choice class) -------------
+# Both bodies below are VERBATIM from a live session: the model emitted
+# them twice, the parser dropped them as near-misses, and no popup ever
+# appeared -- the exact bug this suite pins. The tail '...true}]}}' has a
+# '}' where the outer items array's ']' belongs; _balanced_json coerces it.
+import json as _json
+
+LIVE_BODY = (
+    '{"name": "ask_user_choice", "arguments": {"prompt": "pick art settings", '
+    '"items": [{"type": "choice", "key": "art_style", "label": "Target Art Style", '
+    '"options": ["photoreal render", "painterly baroque"], "multiple": false}, '
+    '{"type": "group", "key": "composition", "label": "Composition", '
+    '"items": [{"type": "choice", "key": "palette", "label": "Palette", '
+    '"options": ["warm golds", "cold blues", "desaturated"], "multiple": true}]}}'
+)
+check("a mismatched closer is repaired",
+      _json.loads(_balanced_json(LIVE_BODY))["name"] == "ask_user_choice")
+prose, calls = parse_text_calls("```tool\n" + LIVE_BODY + "\n```")
+check("the repaired live body parses into a real call",
+      calls and calls[0][0] == "ask_user_choice", str(calls)[:80])
+check("the repaired live body keeps its fields",
+      calls and calls[0][1]["items"][1]["key"] == "composition")
+check("already-balanced JSON is returned untouched",
+      _balanced_json('{"a": [1, {"b": 2}]}') == '{"a": [1, {"b": 2}]}')
+check("truncated JSON still gets closers appended",
+      _json.loads(_balanced_json('{"a": [{"b": 1')) == {"a": [{"b": 1}]})
+check("braces inside strings are not counted",
+      _json.loads(_balanced_json('{"a": "}[{"}')) == {"a": "}[{"})
+check("unmatched closer is left alone (genuinely miswritten)",
+      _balanced_json("}") == "}")
+check("near_miss_tool_name reads intent from unrepairable JSON",
+      near_miss_tool_name(
+          '```tool\n{"name": "ask_user_choice", "arguments": {"items": [{"a": }]}\n```')
+      == "ask_user_choice")
+check("near_miss_tool_name ignores an unknown tool",
+      near_miss_tool_name(
+          '```tool\n{"name": "rm_rf", "arguments": {"a": }]}\n```') is None)
+check("near_miss_tool_name ignores plain prose",
+      near_miss_tool_name('I said "name": "read_file" out loud') is None)
+check("near_miss_tool_name accepts a valid call's name",
+      near_miss_tool_name('```tool\n{"name": "read_file", "arguments": {}}\n```')
+      == "read_file")
 
 print()
 if fails:

@@ -47,8 +47,13 @@ you.
 In `text` mode a call is only accepted if it names a real tool with the
 arguments that tool takes; a near-miss stays in the transcript as prose, so you
 can see what the model actually wrote. Reasoning models that emit
-`<tool_call>{...}</tool_call>` are understood too — that spelling is common
-enough that refusing it would just cost turns.
+`<|tool_call|>{...}<|/tool_call|>` are understood too — that spelling is common
+enough that refusing it would just cost turns. Small models also flub the
+JSON itself — a truncated body (missing closers) or a mismatched one (a
+`}` where an array's `]` belongs, typical in deeply nested `items`
+forms) is re-balanced and accepted; a block that still will not parse is
+left visible and the model is asked once to re-issue the call, so a
+dropped call is never silent.
 
 ## How much you see
 

@@ -170,6 +170,62 @@ check("no role-tool message is left stranded on the text protocol",
       not any(m.get("role") == "tool" for m in session.messages),
       str([m.get("role") for m in session.messages]))
 
+# -- a near-miss call is nudged once, never silently dropped -----------------
+# The live bug: the model emitted a fenced ask_user_choice whose JSON was
+# malformed beyond repair; parse_text_calls dropped it as a near-miss, the
+# turn ended with NO notice and NO tool result, the operator saw nothing,
+# and the next prompt got the same broken call again. The engine must
+# detect the intent, tell the operator, and ask the model to re-issue.
+WRECKED = (
+    '```tool\n{"name": "ask_user_choice", "arguments": '
+    '{"items": [{"a": }]}\n```'
+)
+
+
+class WreckedClient:
+    """Round 1: the wrecked call. Round 2: prose (it obeyed the nudge)."""
+
+    def __init__(self) -> None:
+        self.rounds = 0
+        self.saw_nudge = False
+
+    def supports_native_tools(self, model: str) -> bool:
+        return False
+
+    def chat_stream(self, *, model, messages, options, tools=None, think=None,
+                    keep_alive="10m"):
+        self.rounds += 1
+        last_user = [m for m in messages if m.get("role") == "user"]
+        self.saw_nudge = bool(
+            last_user and "could not be parsed" in last_user[-1]["content"])
+        if self.rounds == 1:
+            reply = WRECKED
+        else:
+            reply = "Understood -- I will answer in prose."
+        yield {"message": {"content": reply}, "done": True, "done_reason": "stop"}
+
+
+wclient = WreckedClient()
+whooks = Recorder()
+wconfig = ChatConfig(root=Path("."),
+                    protocol="text", thinking=False, max_tool_rounds=8)
+wsession = ChatSession(wclient, wconfig, hooks=whooks)
+wanswer = wsession.send("ask me a question")
+
+check("the wrecked call never ran", whooks.calls == [], str(whooks.calls))
+check("the operator was told about the dropped call",
+      any("could not be parsed" in n for n in whooks.notices),
+      str(whooks.notices))
+check("the model saw the re-issue nudge", wclient.saw_nudge)
+check("the turn ends in prose", "Understood" in wanswer, repr(wanswer[:60]))
+check("the nudge is retired after the round that needed it",
+      not any("could not be parsed" in str(m.get("content", ""))
+              for m in wsession.messages),
+      str([m.get("content", "")[:60] for m in wsession.messages]))
+check("the wrecked call is kept in the assistant's recorded message",
+      any("ask_user_choice" in str(m.get("content", ""))
+          for m in wsession.messages if m.get("role") == "assistant"))
+
 print()
 if fails:
     print(f"{len(fails)} failure(s):")

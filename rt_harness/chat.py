@@ -31,6 +31,7 @@ from .tools import (
     parse_text_calls,
     summarize_call,
     text_protocol_prompt,
+    near_miss_tool_name,
 )
 
 #: How much of a tool result is echoed back to the model. The full text is what
@@ -947,6 +948,40 @@ class ChatSession:
                     self.hooks.notice("generation cancelled")
                     return final
                 if not calls:
+                    # A text-protocol round can end with a near-miss:
+                    # a fenced block naming a real tool whose JSON
+                    # cannot be repaired. The call is dropped
+                    # (correctly -- never run unreadable arguments),
+                    # but the OPERATOR hears nothing and the MODEL is
+                    # never told, so it re-emits the same broken call
+                    # on the next prompt -- the exact loop that lost
+                    # every ask_user_choice popup in a live session.
+                    # Nudge once, like the native-path retry; the
+                    # assistant message is already in history above.
+                    if (self.uses_tools() and self.protocol == "text"
+                            and not tool_call_retry_used):
+                        near = near_miss_tool_name(
+                            prose, self._info_names() + self._mcp_names())
+                        if near is not None:
+                            tool_call_retry_used = True
+                            self.hooks.notice(
+                                f"the model's {near} call could not be "
+                                "parsed as JSON; asked it to re-issue "
+                                "the call"
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"Your {near} tool call could not be "
+                                    "parsed -- the JSON was malformed. "
+                                    "Re-issue the call as one complete, "
+                                    "well-formed JSON object with correctly "
+                                    "matched brackets, or answer in prose "
+                                    "instead."
+                                ),
+                            })
+                            nudge_index = len(self.messages) - 1
+                            continue
                     self.turns += 1
                     self._explain_empty(final)
                     return final
