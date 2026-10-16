@@ -1374,14 +1374,29 @@ TEXT_CALL_RE = re.compile(r"```(?:tool|tool_call|json)?\s*(\{.*?\})\s*```", re.D
 #: Some models spell tool calls the way their own training did rather than the
 #: way the protocol prompt asks. Both spellings name a real tool with real
 #: arguments or they are ignored, so accepting the tag form costs nothing.
-TAG_CALL_RE = re.compile(r"<\|tool_call\|>\s*(\{.*?\})\s*<\|/tool_call\|>", re.DOTALL)
+#: The tag dialects models actually emit. The harness protocol asks for
+#: fenced JSON, but tool-trained models spell calls their own way. The
+#: tolerance layer is MODEL-AGNOSTIC by design: it accepts any
+#: ``tool_call`` tag spelling the major families emit, rather than one
+#: model's dialect. Families covered: plain and piped angle markers
+#: (llama.cpp server conventions, abliterated Gemma), and via the
+#: OPEN/CLOSE character classes any equivalent bracketing a future
+#: checkpoint invents can be added in ONE place here -- the parser
+#: below never names a model. The call name may ride in the tag
+#: (``call:name``) with arguments marker-quoted; both shapes end at a
+#: closing tag or end-of-text.
+TAG_CALL_RE = re.compile(
+    r"<\|?/?tool_call\|?>\s*(\{.*?\})\s*<\|?/?tool_call\|?>",
+    re.DOTALL,
+)
 
-#: Abliterated Gemma's own dialect: ``<|tool_call|>call:name{args}`` with no
-#: JSON object and no closing tag. The arguments are brace-quoted with
-#: ``<|"|>`` for quotes; the engine normalizes them into JSON so the
-#: call parses the same as every other spelling.
+#: The named form: the tool name rides in the tag itself, the
+#: arguments are often not JSON (marker quotes, bare keys). The
+#: tolerant scan (_parse_marker_args) reads schema-shaped bodies.
 TAG_CALL_NAME_RE = re.compile(
-    r"<\|tool_call\|>\s*call:\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*?\})?\s*(?:<\|/tool_call\|>|$)",
+    r"<\|?/?tool_call\|?>\s*(?:call:)?\s*"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*?\})?"
+    r"\s*(?:<\|?/?tool_call\|?>|$)",
     re.DOTALL,
 )
 
@@ -1405,9 +1420,10 @@ def _parse_marker_args(body: str) -> dict[str, Any]:
     """The Gemma ``call:name{...}`` dialect: JSON when the model wrote
     real JSON, else a shallow key:value scan. Supports the shapes the
     tool schemas use: scalars, quoted strings, flat lists, and lists of
-    flat objects (one level). Returns {} when the body cannot be read
-    that way -- the near-miss rule then drops the call rather than
-    running a tool on guessed arguments."""
+    flat objects (one level). Each match CONSUMES its value's span so a
+    nested object's keys never leak to the top level. Returns {} when
+    the body cannot be read that way -- the near-miss rule then drops
+    the call rather than running a tool on guessed arguments."""
     out: dict[str, Any] = {}
 
     def scalar(tok: str) -> Any:
@@ -1426,10 +1442,12 @@ def _parse_marker_args(body: str) -> dict[str, Any]:
             except ValueError:
                 return tok
 
+    pos = 0
     for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*:\s*', body):
+        if m.start() < pos:
+            continue  # inside a consumed value's span
         key = m.group(1)
         rest = body[m.end():]
-        # list of objects: [{k: v, ...}, ...]
         if rest.lstrip().startswith("["):
             inner = rest.strip()
             items: list[Any] = []
@@ -1438,20 +1456,24 @@ def _parse_marker_args(body: str) -> dict[str, Any]:
                 if obj:
                     items.append(obj)
             if items:
+                # consume through the closing bracket of this list
+                close = inner.find("]")
+                pos = m.end() + (close + 1 if close >= 0
+                                 else len(inner))
                 out.setdefault(key, items)
                 continue
-            # flat list: [a, b, c]
             lm = re.match(r"\[([^\[\]]*)\]", inner)
             if lm:
                 vals = [scalar(t) for t in lm.group(1).split(",")
                         if t.strip()]
                 if vals:
+                    pos = m.end() + lm.end()
                     out.setdefault(key, vals)
                 continue
-        # scalar / quoted string: take up to the next top-level comma
         sm = re.match(r'\s*("[^"]*"|[^,}\]]+)', rest)
         if sm:
             out.setdefault(key, scalar(sm.group(1)))
+            pos = m.end() + sm.end()
     return out
 
 
@@ -1463,26 +1485,50 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
     dropped, so the operator can see what the model actually wrote.
     """
     known = TOOL_NAMES + tuple(extra_names)
-    calls: list[tuple[str, dict[str, Any]]] = []
-    spans: list[tuple[int, int]] = []
-    matches = [
-        match for pattern in (TEXT_CALL_RE, TAG_CALL_RE) for match in pattern.finditer(text)
-    ]
-    # The name-dialect matches carry the tool name in the tag itself
-    # (Gemma: <|tool_call|>call:name{args}); normalize their shape
-    # into (name, arguments-dict) up front so the loop below is uniform.
-    named: list[tuple[Any, str, dict[str, Any]]] = []
+
+    # Collect (start, name, arguments) triples from every spelling --
+    # fenced JSON, the JSON tag form, and the named-dialect tag form --
+    # then sort ONCE by document position: the calls run in the order
+    # the model wrote them, and the prose deletion (reversed spans)
+    # cannot shift an earlier span by removing a later one first.
+
+    def _arguments_of(payload: Any) -> dict[str, Any] | None:
+        """(name, arguments) from a JSON payload dict, or None."""
+        if not isinstance(payload, dict):
+            return None
+        name = payload.get("name") or payload.get("tool")
+        if not isinstance(name, str) or name not in known:
+            return None
+        arguments = payload.get("arguments", payload.get("args", {}))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = {}
+        return (name, arguments) if isinstance(arguments, dict) else None
+
+    found: list[tuple[int, int, str, dict[str, Any]]] = []
+    for pattern in (TEXT_CALL_RE, TAG_CALL_RE):
+        for match in pattern.finditer(text):
+            try:
+                payload = json.loads(match.group(1))
+            except ValueError:
+                continue  # malformed JSON: a near-miss, left in prose
+            pair = _arguments_of(payload)
+            if pair is None:
+                continue
+            found.append((match.start(), match.end(),
+                          pair[0], pair[1]))
+    # The named dialect (abliterated Gemma): the tool name rides in the
+    # tag, the arguments are marker-quoted and often not JSON. Quote
+    # markers normalize; real JSON parses; anything else goes through
+    # the tolerant schema-shaped scan. An unreadable body stays a
+    # near-miss -- the call is dropped, never run on guessed arguments.
     for match in TAG_CALL_NAME_RE.finditer(text):
         name = match.group(1)
         if name not in known:
             continue
         raw_args = match.group(2) or ""
-        # Gemma quotes with <|"|> and drops key quotes entirely:
-        # {path:<|"|>a.txt<|"|>}. Normalize the markers, then parse
-        # tolerantly: real JSON when the model wrote it, else a
-        # key:value scan (top level and one list/object level deep --
-        # the shapes the tool schemas use). Anything the scan cannot
-        # express stays a near-miss and the call is dropped.
         cleaned = raw_args.replace('<|"|>', '"')
         arguments: dict[str, Any] = {}
         try:
@@ -1491,35 +1537,13 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
                 arguments = parsed
         except ValueError:
             arguments = _parse_marker_args(cleaned)
-        named.append((match, name, arguments))
-        spans.append((match.start(), match.end()))
-    for match in matches:
-        try:
-            payload = json.loads(match.group(1))
-        except ValueError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        name = payload.get("name") or payload.get("tool")
-        arguments = payload.get("arguments", payload.get("args", {}))
-        if not isinstance(name, str):
-            continue
-        if name not in known:
-            continue
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except ValueError:
-                arguments = {}
-        if not isinstance(arguments, dict):
-            continue
-        calls.append((name, arguments))
-        spans.append((match.start(), match.end()))
-    for match, name, arguments in named:
-        calls.append((name, arguments))
+        found.append((match.start(), match.end(), name, arguments))
 
+    found.sort(key=lambda item: item[0])
+    calls = [(name, arguments)
+             for _, _, name, arguments in found]
     prose = text
-    for start, end in reversed(spans):
+    for start, end, _, _ in reversed(found):
         prose = prose[:start] + prose[end:]
     return prose.strip(), calls
 
