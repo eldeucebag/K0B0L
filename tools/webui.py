@@ -4154,11 +4154,20 @@ def main() -> int:
                     skills = list_skills(chat_config.root)
                     skill = read_skill(skills, name) if name else None
                     if create or skill is None:
-                        # New skill: workspace dir, slug from the name.
+                        # New skill: workspace dir, slug from the
+                        # FRONTMATTER name -- the name the operator
+                        # actually wrote. The request's `name` field is
+                        # the editor's stale slot (the template's
+                        # my-skill on a fresh +new); slugging from it
+                        # buried one operator's art_director under
+                        # skills/my-skill/ while the file's frontmatter
+                        # said art_director -- discoverable, but at a
+                        # nonsense path, and unrenamable from the UI.
                         import re as _re
 
+                        fm_name = str(meta.get("name") or "").strip()
                         slug = _re.sub(r"[^a-z0-9-]+", "-",
-                                       name.lower()).strip("-") \
+                                       fm_name.lower()).strip("-") \
                             or "my-skill"
                         root_dir = Path(chat_config.root) / "skills"
                         base, n = slug, 2
