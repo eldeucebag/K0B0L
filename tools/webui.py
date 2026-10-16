@@ -45,33 +45,58 @@ PORT = 8321
 # numbers in sync when a palette changes there.
 
 WEB_THEMES: dict[str, dict[str, str]] = {
+    # Windows 3.1 "Hot Dog Stand", from the scheme's own value table:
+    # #FFFF00 desktop/window faces, #FF0000 window background, white
+    # window text, BLACK active title bars, silver #C0C0C0 buttons with
+    # the #808080 shadow. Code blocks are the black title bar; errors
+    # are white-on-red the way the scheme highlighted selections.
     "hotdog-3x": {
-        "--bg": "#A80000", "--surface": "#8E0000", "--band": "#5C0000",
-        "--ink": "#FFFF00", "--muted": "#FFCC00", "--faint": "#CC9900",
-        "--accent": "#FFB000", "--accent-ink": "#000000",
-        "--code-bg": "#000000", "--think-bg": "#5C0000",
-        "--warn": "#FF8C00", "--err": "#FF2D2D", "--border": "#FFFF00",
+        "--bg": "#FFFF00", "--surface": "#C0C0C0", "--band": "#FF0000",
+        "--ink": "#FFFFFF", "--muted": "#C0C0C0", "--faint": "#808080",
+        "--accent": "#FF0000", "--accent-ink": "#FFFF00",
+        "--code-bg": "#000000", "--think-bg": "#A00000",
+        "--warn": "#FF0000", "--err": "#FFFFFF",
+        "--border": "#000000",
+        "--syn-k": "#FF0000", "--syn-s": "#A0A0A0", "--syn-n": "#FF0000",
+        "--syn-c": "#808080", "--syn-f": "#C0C0C0",
     },
+    # BeOS R5, from Haiku's preserved default UI colors: #D8D8D8 panel
+    # grey, the #FFCB00 window tab, #336698 desktop blue, keyboard-nav
+    # #0000E5, document background white, failure #FF4136.
     "beos": {
-        "--bg": "#D6D3CE", "--surface": "#C9C5BE", "--band": "#C9C5BE",
-        "--ink": "#101010", "--muted": "#4A4640", "--faint": "#8A867E",
-        "--accent": "#1A1AB8", "--accent-ink": "#FFFFFF",
-        "--code-bg": "#FFFFFF", "--think-bg": "#C9C5BE",
-        "--warn": "#A08000", "--err": "#C00000", "--border": "#8A867E",
+        "--bg": "#D8D8D8", "--surface": "#DEDEDE", "--band": "#E8E8E8",
+        "--ink": "#101010", "--muted": "#3F3F3F", "--faint": "#ACACAC",
+        "--accent": "#FFCB00", "--accent-ink": "#000000",
+        "--code-bg": "#FFFFFF", "--think-bg": "#E8E8E8",
+        "--warn": "#808040", "--err": "#FF4136", "--border": "#ACACAC",
+        "--syn-k": "#0000E5", "--syn-s": "#27528C", "--syn-n": "#6698CB",
+        "--syn-c": "#9C9C9C", "--syn-f": "#336698",
     },
+    # C64 boot screen, strictly the 16 VIC-II colors (pepto/VICE):
+    # #352879 blue screen, #7869C4 light-blue border, #6F3D86 purple,
+    # #B8C76F yellow, #9AD284 light green, #883932 red, #70A4B2 cyan.
+    # The machine had no shade steps inside a hue, so the "darker" bands
+    # use its purple instead of invented blends.
     "commodore-64": {
-        "--bg": "#352879", "--surface": "#2A1F60", "--band": "#241A52",
-        "--ink": "#A6A0F0", "--muted": "#9B93E8", "--faint": "#6C5EB5",
+        "--bg": "#352879", "--surface": "#352879", "--band": "#6F3D86",
+        "--ink": "#7869C4", "--muted": "#6C6C6C", "--faint": "#444444",
         "--accent": "#B8C76F", "--accent-ink": "#352879",
-        "--code-bg": "#1B1240", "--think-bg": "#241A52",
-        "--warn": "#B8C76F", "--err": "#9A6759", "--border": "#6C5EB5",
+        "--code-bg": "#6F3D86", "--think-bg": "#352879",
+        "--warn": "#B8C76F", "--err": "#883932", "--border": "#7869C4",
+        "--syn-k": "#EDF171", "--syn-s": "#9AD284", "--syn-n": "#B8C76F",
+        "--syn-c": "#7869C4", "--syn-f": "#70A4B2",
     },
+    # MS-DOS Editor (EDIT.COM/QBasic IDE), EGA: #0000AA blue screen,
+    # #AAAAAA silver text, #00AAAA cyan title/menu bar, #FFFF55 yellow,
+    # #55FF55 bright green, #FF5555 bright red, #55FFFF bright cyan.
     "edit-com": {
-        "--bg": "#0000AA", "--surface": "#000088", "--band": "#000066",
-        "--ink": "#AAAAAA", "--muted": "#767676", "--faint": "#545454",
-        "--accent": "#FFFF55", "--accent-ink": "#0000AA",
-        "--code-bg": "#000044", "--think-bg": "#000066",
+        "--bg": "#0000AA", "--surface": "#0000AA", "--band": "#0000AA",
+        "--ink": "#AAAAAA", "--muted": "#55FFFF", "--faint": "#5555FF",
+        "--accent": "#00AAAA", "--accent-ink": "#000000",
+        "--code-bg": "#000055", "--think-bg": "#000077",
         "--warn": "#FFFF55", "--err": "#FF5555", "--border": "#00AAAA",
+        "--syn-k": "#FFFF55", "--syn-s": "#55FF55", "--syn-n": "#FFFFFF",
+        "--syn-c": "#5555FF", "--syn-f": "#55FFFF",
     },
     "amber": {
         "--bg": "#000000", "--surface": "#140D00", "--band": "#2B1D00",
@@ -79,6 +104,8 @@ WEB_THEMES: dict[str, dict[str, str]] = {
         "--accent": "#FFD9A0", "--accent-ink": "#000000",
         "--code-bg": "#140D00", "--think-bg": "#2B1D00",
         "--warn": "#E8A200", "--err": "#FF7A00", "--border": "#8A5F00",
+        "--syn-k": "#FFD9A0", "--syn-s": "#FFB000", "--syn-n": "#FFC46B",
+        "--syn-c": "#8A5F00", "--syn-f": "#FFD9A0",
     },
     "matrix": {
         "--bg": "#000000", "--surface": "#001A0A", "--band": "#003B00",
@@ -86,6 +113,8 @@ WEB_THEMES: dict[str, dict[str, str]] = {
         "--accent": "#7CFF9B", "--accent-ink": "#000000",
         "--code-bg": "#001A0A", "--think-bg": "#003B00",
         "--warn": "#B6FF00", "--err": "#FF3B3B", "--border": "#008F11",
+        "--syn-k": "#7CFF9B", "--syn-s": "#00FF41", "--syn-n": "#7CFF9B",
+        "--syn-c": "#008F11", "--syn-f": "#00FF41",
     },
 }
 
@@ -103,6 +132,12 @@ DEFAULT_THEME = {
 #: default was a one-way door and the prefs file kept the last theme
 #: forever. The TUI ignores it (not in its list) and uses its own default.
 WEB_THEMES["k0b0l-dark"] = dict(DEFAULT_THEME)
+#: Code tokens for the default (the pastel set the :root block declares);
+#: every palette must own its tokens or the previous theme's survive.
+WEB_THEMES["k0b0l-dark"].update({
+    "--syn-k": "#c792ea", "--syn-s": "#c3e88d", "--syn-n": "#f78c6c",
+    "--syn-c": "#5c6474", "--syn-f": "#82aaff",
+})
 
 # -- the page (self-contained; theme tokens ported from the harness) -------
 
@@ -119,6 +154,10 @@ PAGE = """<!DOCTYPE html>
   --accent: #62e2c6; --accent-ink: #062a22;
   --code-bg: #131722; --think-bg: #12141c;
   --warn: #e2b962; --err: #e2627a;
+  /* code tokens: per-theme, so a retro theme's code blocks don't wear
+     another era's pastels */
+  --syn-k: #c792ea; --syn-s: #c3e88d; --syn-n: #f78c6c;
+  --syn-c: #5c6474; --syn-f: #82aaff;
   --mono: ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
 * { box-sizing: border-box; }
@@ -136,7 +175,7 @@ body {
 }
 header {
   display: flex; align-items: baseline; gap: 12px;
-  padding: 10px 16px; border-bottom: 1px solid #1d2330;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
   background: var(--surface);
   min-width: 0;
 }
@@ -209,18 +248,19 @@ details summary {
 }
 details summary::before { content: "▸ "; color: var(--faint); }
 details[open] summary::before { content: "▾ "; }
-details.think summary { color: #9aa3b8; }
+details.think summary { color: var(--muted); }
 details .body { padding: 2px 12px 10px; }
 details.think .body { color: var(--muted); font-size: 13.5px;
   white-space: pre-wrap; }
+details.think .body, details.think summary { background: var(--think-bg); }
 details.code .body { margin: 0; }
 pre.code {
   margin: 0; padding: 10px 12px; overflow-x: auto;
   background: var(--code-bg); border-radius: 0 0 8px 8px;
   font: 13px/1.5 var(--mono);
 }
-.k { color: #c792ea; } .s { color: #c3e88d; } .n { color: #f78c6c; }
-.c { color: #5c6474; font-style: italic; } .f { color: #82aaff; }
+.k { color: var(--syn-k); } .s { color: var(--syn-s); } .n { color: var(--syn-n); }
+.c { color: var(--syn-c); font-style: italic; } .f { color: var(--syn-f); }
 .tool { display: grid; gap: 2px; }
 .tool .call {
   font-family: var(--mono); font-size: 13px; color: var(--accent);
@@ -244,7 +284,7 @@ pre.code {
 .statusline { color: var(--faint); font-size: 12px;
   font-family: var(--mono); text-align: right; }
 img.gen { max-width: min(100%, 560px); border-radius: 8px;
-  border: 1px solid #1d2330; display: block; }
+  border: 1px solid var(--border); display: block; }
 figure { margin: 0; position: relative; }
 figcaption { color: var(--faint); font-size: 11.5px;
   font-family: var(--mono); margin-top: 4px; }
@@ -267,11 +307,11 @@ figcaption { color: var(--faint); font-size: 11.5px;
 }
 .artifact-actions .act:hover { color: var(--accent); border-color: var(--accent); }
 form { display: flex; gap: 10px; padding: 12px 16px;
-  border-top: 1px solid #1d2330; background: var(--surface);
+  border-top: 1px solid var(--border); background: var(--surface);
   align-items: flex-end; }
 #input, #attach-note {
   background: var(--bg); color: var(--ink);
-  border: 1px solid #242c3d; border-radius: 8px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   font: 14px/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
 #input {
@@ -414,7 +454,7 @@ form { display: flex; gap: 10px; padding: 12px 16px;
   padding: 4px 12px; cursor: pointer; font-size: 13px; }
 .form-opt.sel { color: var(--accent); border-color: var(--accent); }
 .form-text { background: var(--bg); color: var(--ink);
-  border: 1px solid #242c3d; border-radius: 8px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
   font: 13px/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
   width: 100%; box-sizing: border-box; }
 .form-text:focus { outline: none; border-color: var(--accent); }
@@ -786,16 +826,16 @@ dialog button.primary:hover { color: var(--accent-ink); }
 </dialog>
 <script>
 const THEMES = {
-  "k0b0l-dark": null,
-  "hotdog-3x": {"--bg":"#A80000","--surface":"#8E0000","--band":"#5C0000","--ink":"#FFFF00","--muted":"#FFCC00","--faint":"#CC9900","--accent":"#FFB000","--accent-ink":"#000000","--code-bg":"#000000","--think-bg":"#5C0000","--warn":"#FF8C00","--err":"#FF2D2D","--border":"#FFFF00"},
-  "beos": {"--bg":"#D6D3CE","--surface":"#C9C5BE","--band":"#C9C5BE","--ink":"#101010","--muted":"#4A4640","--faint":"#8A867E","--accent":"#1A1AB8","--accent-ink":"#FFFFFF","--code-bg":"#FFFFFF","--think-bg":"#C9C5BE","--warn":"#A08000","--err":"#C00000","--border":"#8A867E"},
-  "commodore-64": {"--bg":"#352879","--surface":"#2A1F60","--band":"#241A52","--ink":"#A6A0F0","--muted":"#9B93E8","--faint":"#6C5EB5","--accent":"#B8C76F","--accent-ink":"#352879","--code-bg":"#1B1240","--think-bg":"#241A52","--warn":"#B8C76F","--err":"#9A6759","--border":"#6C5EB5"},
-  "edit-com": {"--bg":"#0000AA","--surface":"#000088","--band":"#000066","--ink":"#AAAAAA","--muted":"#767676","--faint":"#545454","--accent":"#FFFF55","--accent-ink":"#0000AA","--code-bg":"#000044","--think-bg":"#000066","--warn":"#FFFF55","--err":"#FF5555","--border":"#00AAAA"},
-  "amber": {"--bg":"#000000","--surface":"#140D00","--band":"#2B1D00","--ink":"#FFB000","--muted":"#FFC46B","--faint":"#8A5F00","--accent":"#FFD9A0","--accent-ink":"#000000","--code-bg":"#140D00","--think-bg":"#2B1D00","--warn":"#E8A200","--err":"#FF7A00","--border":"#8A5F00"},
-  "matrix": {"--bg":"#000000","--surface":"#001A0A","--band":"#003B00","--ink":"#00FF41","--muted":"#7CFF9B","--faint":"#008F11","--accent":"#7CFF9B","--accent-ink":"#000000","--code-bg":"#001A0A","--think-bg":"#003B00","--warn":"#B6FF00","--err":"#FF3B3B","--border":"#008F11"},
+  "k0b0l-dark": {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330","--syn-k":"#c792ea","--syn-s":"#c3e88d","--syn-n":"#f78c6c","--syn-c":"#5c6474","--syn-f":"#82aaff"},
+  "hotdog-3x": {"--bg":"#FFFF00","--surface":"#C0C0C0","--band":"#FF0000","--ink":"#FFFFFF","--muted":"#C0C0C0","--faint":"#808080","--accent":"#FF0000","--accent-ink":"#FFFF00","--code-bg":"#000000","--think-bg":"#A00000","--warn":"#FF0000","--err":"#FFFFFF","--border":"#000000","--syn-k":"#FF0000","--syn-s":"#A0A0A0","--syn-n":"#FF0000","--syn-c":"#808080","--syn-f":"#C0C0C0"},
+  "beos": {"--bg":"#D8D8D8","--surface":"#DEDEDE","--band":"#E8E8E8","--ink":"#101010","--muted":"#3F3F3F","--faint":"#ACACAC","--accent":"#FFCB00","--accent-ink":"#000000","--code-bg":"#FFFFFF","--think-bg":"#E8E8E8","--warn":"#808040","--err":"#FF4136","--border":"#ACACAC","--syn-k":"#0000E5","--syn-s":"#27528C","--syn-n":"#6698CB","--syn-c":"#9C9C9C","--syn-f":"#336698"},
+  "commodore-64": {"--bg":"#352879","--surface":"#352879","--band":"#6F3D86","--ink":"#7869C4","--muted":"#6C6C6C","--faint":"#444444","--accent":"#B8C76F","--accent-ink":"#352879","--code-bg":"#6F3D86","--think-bg":"#352879","--warn":"#B8C76F","--err":"#883932","--border":"#7869C4","--syn-k":"#EDF171","--syn-s":"#9AD284","--syn-n":"#B8C76F","--syn-c":"#7869C4","--syn-f":"#70A4B2"},
+  "edit-com": {"--bg":"#0000AA","--surface":"#0000AA","--band":"#0000AA","--ink":"#AAAAAA","--muted":"#55FFFF","--faint":"#5555FF","--accent":"#00AAAA","--accent-ink":"#000000","--code-bg":"#000055","--think-bg":"#000077","--warn":"#FFFF55","--err":"#FF5555","--border":"#00AAAA","--syn-k":"#FFFF55","--syn-s":"#55FF55","--syn-n":"#FFFFFF","--syn-c":"#5555FF","--syn-f":"#55FFFF"},
+  "amber": {"--bg":"#000000","--surface":"#140D00","--band":"#2B1D00","--ink":"#FFB000","--muted":"#FFC46B","--faint":"#8A5F00","--accent":"#FFD9A0","--accent-ink":"#000000","--code-bg":"#140D00","--think-bg":"#2B1D00","--warn":"#E8A200","--err":"#FF7A00","--border":"#8A5F00","--syn-k":"#FFD9A0","--syn-s":"#FFB000","--syn-n":"#FFC46B","--syn-c":"#8A5F00","--syn-f":"#FFD9A0"},
+  "matrix": {"--bg":"#000000","--surface":"#001A0A","--band":"#003B00","--ink":"#00FF41","--muted":"#7CFF9B","--faint":"#008F11","--accent":"#7CFF9B","--accent-ink":"#000000","--code-bg":"#001A0A","--think-bg":"#003B00","--warn":"#B6FF00","--err":"#FF3B3B","--border":"#008F11","--syn-k":"#7CFF9B","--syn-s":"#00FF41","--syn-n":"#7CFF9B","--syn-c":"#008F11","--syn-f":"#00FF41"},
 };
-const DEFAULT_PALETTE = {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330"};
-const ROOT_VARS = ["--bg","--surface","--band","--ink","--muted","--faint","--accent","--accent-ink","--code-bg","--think-bg","--warn","--err","--border"];
+const DEFAULT_PALETTE = {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330","--syn-k":"#c792ea","--syn-s":"#c3e88d","--syn-n":"#f78c6c","--syn-c":"#5c6474","--syn-f":"#82aaff"};
+const ROOT_VARS = ["--bg","--surface","--band","--ink","--muted","--faint","--accent","--accent-ink","--code-bg","--think-bg","--warn","--err","--border","--syn-k","--syn-s","--syn-n","--syn-c","--syn-f"];
 let ws = null;  // assigned by connectWS(); every handler re-attaches there
 const transcript = document.getElementById("transcript");
 const input = document.getElementById("input");
@@ -868,7 +908,7 @@ function applyTheme(name) {
   if (name !== "k0b0l-dark" && !THEMES[name]) name = "k0b0l-dark";
   const palette = THEMES[name] || DEFAULT_PALETTE;
   for (const key of ROOT_VARS) {
-    document.documentElement.style.setProperty(key, palette[key]);
+    if (palette[key]) document.documentElement.style.setProperty(key, palette[key]);
   }
   currentTheme = name;
   const sel = document.getElementById("opt-theme");
