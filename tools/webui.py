@@ -764,10 +764,11 @@ dialog button.primary:hover { color: var(--accent-ink); }
   </div>
 </dialog>
 <dialog id="history-dialog">
-  <h3>sessions</h3>
+  <h3>chats</h3>
   <div class="hist-actions">
     <input id="hist-name" placeholder="name to save as" maxlength="60">
     <button id="hist-save">save current</button>
+    <button id="hist-new">new chat</button>
   </div>
   <div id="hist-list" class="hist-list"></div>
   <div class="opt-actions">
@@ -858,6 +859,7 @@ let codeBuf = null;
 let genBar = null;
 let genLabel = null;
 let currentTheme = "k0b0l-dark";
+let currentChat = "";   // the chat this tab is bound to (server truth)
 let whoEl = null;
 let typingEl = null;
 let busyTimer = null;
@@ -1360,7 +1362,9 @@ function wireSocket() {
   const m = JSON.parse(ev.data);
   switch (m.kind) {
     case "meta":
-      meta.textContent = m.model + " · " + m.protocol + " · ctx " + m.num_ctx;
+      currentChat = m.chat || currentChat;
+      meta.textContent = m.model + " · " + m.protocol + " · ctx "
+        + m.num_ctx + (m.chat ? " · " + m.chat : "");
       applyTheme(m.theme || "k0b0l-dark");
       // the reasoning select reflects the server's truth (a fresh
       // connect, a /reason from another tab, a restart)
@@ -1781,7 +1785,7 @@ function renderSessionList(entries) {
   if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "sess-empty";
-    empty.textContent = "no saved sessions yet";
+    empty.textContent = "no chats yet";
     list.appendChild(empty);
     return;
   }
@@ -1802,7 +1806,7 @@ function renderSessionList(entries) {
     main.appendChild(nameEl); main.appendChild(sub);
     row.appendChild(main);
     const loadBtn = document.createElement("button");
-    loadBtn.textContent = "load";
+    loadBtn.textContent = "open";
     loadBtn.addEventListener("click", () => {
       ws.send(JSON.stringify({ session: { verb: "load", name: s.name } }));
     });
@@ -1813,9 +1817,9 @@ function renderSessionList(entries) {
     delBtn.title = "delete";
     delBtn.addEventListener("click", () => {
       ws.send(JSON.stringify({ session: { verb: "delete", name: s.name } }));
-      if (s.name === "__webui_last__") {
-        // the live conversation is gone server-side: drop the local
-        // copy too, or a repaint resurrects it
+      if (s.name === currentChat) {
+        // the conversation this tab is viewing is gone server-side:
+        // drop the local copy too, or a repaint resurrects it
         try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
         transcript.innerHTML = "";
         turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
@@ -2111,6 +2115,9 @@ document.getElementById("img-generate").addEventListener("click", () => {
 document.getElementById("history-btn").addEventListener("click", openHistory);
 document.getElementById("hist-close").addEventListener("click", () => {
   document.getElementById("history-dialog").close();
+});
+document.getElementById("hist-new").addEventListener("click", () => {
+  ws.send(JSON.stringify({ session: { verb: "new" } }));
 });
 document.getElementById("hist-save").addEventListener("click", () => {
   const box = document.getElementById("hist-name");
@@ -3160,122 +3167,178 @@ def main() -> int:
     #: on the fixed sibling port (same derivation as tools/imagegen.py).
     swap_api = (f"http://{urlparse(config.api_url).hostname or '127.0.0.1'}"
                 f":7861")
-    #: Generation state shared across connections: "active" is the run in
-    #: flight (its frames are the replay log a refreshed page catches up
-    #: from), "last" the most recent finished run (replayed for a few
-    #: minutes so a refresh right after completion still shows the image).
-    #: A generation outlives the socket that requested it -- the operator
-    #: refreshing mid-run must rejoin the animation, not lose it.
+    # -- chats: N self-contained conversations, every socket bound to one --
+    # The operator's contract: a session IS a chat, the way chat front
+    # ends work. Each chat owns its engine session (its own context
+    # window, skills set, model config), its conversation graph, its
+    # frame log, and the set of sockets viewing it. A turn in one chat
+    # reaches only that chat's tabs -- no bleed-over. Switching is
+    # binding: `session load` rebinds the requesting socket and
+    # repaints it alone; every other tab keeps its own conversation.
+    #
+    # Still server-global on purpose: the model client (one endpoint),
+    # the image-run registry GEN (one GPU), and TURN_LOCK (one
+    # generation at a time server-wide -- the card and the swap chain
+    # are shared hardware, not per-chat state).
     GEN: dict[str, Any] = {"active": None, "last": None}
-    #: Every live WebSocket: image-generation frames broadcast to all
-    #: of them, so a second tab (or a refreshed one) sees the same run.
-    SOCKETS: set = set()
 
-    #: The in-flight generation TASK (text turn or image op), hoisted to
-    #: serve scope on purpose: a generation is server-side state that
-    #: outlives whichever socket started it. Cancel must work from a
-    #: RECONNECTED tab (the Android freezer reconnects mid-run) or a
-    #: second tab -- a per-socket handle reads as empty there and the
-    #: operator gets "nothing is running" while text still streams.
-    #: One task at a time: TURN_LOCK serializes engine work; this handle
-    #: is what Cancel clicks race against.
-    current_task: dict[str, asyncio.Task | None] = {"task": None}
-
-    #: Server-lifetime frame log (bounded): the replay every connect
-    #: fast-forwards through. This IS the transcript of record.
-    HISTORY: list[dict[str, Any]] = []
+    #: The in-flight generation TASK per chat: Cancel clicks race the
+    #: handle of the chat the click came from. The one-task-at-a-time
+    #: guarantee is TURN_LOCK's (server-wide), but a task handle is
+    #: per-chat so a second chat's tab never shows another chat's run
+    #: as its own.
     HISTORY_CAP = 2000
 
-    async def send_pub(frame: dict[str, Any]) -> None:
-        """Publish to every live socket AND into the history log: the
-        log is the server-side transcript; every connect replays it.
-        Dead sockets are dropped, never fatal. ask_form frames are the
-        one exception to the log: a stale form popping open on every
-        page refresh would re-ask a question the operator answered."""
-        kind = frame.get("kind")
-        if kind != "pong" and kind != "ask_form":
-            HISTORY.append(dict(frame))
-            if len(HISTORY) > HISTORY_CAP:
-                del HISTORY[0:len(HISTORY) - HISTORY_CAP]
-        for sock in list(SOCKETS):
+    class ChatBox:
+        """One self-contained chat: engine session, graph, frame log,
+        viewers. Built from a session file (or fresh) and registered in
+        CHATS; lives until the server stops."""
+
+        def __init__(self, name: str, ui: "WebChat",
+                     tree: "TurnTree", sessions: "SessionManager") -> None:
+            self.name = name
+            self.ui = ui
+            self.tree = tree
+            self.sessions = sessions
+            #: bounded frame log = this chat's transcript of record
+            self.history: list[dict[str, Any]] = []
+            #: sockets currently viewing THIS chat
+            self.sockets: set = set()
+            #: the in-flight task (text/image) this chat owns
+            self.task: asyncio.Task | None = None
+
+        def log(self, frame: dict[str, Any]) -> None:
+            """Record into this chat's frame log (bounded). ask_form is
+            the one exception: a replayed form would re-ask a question
+            already answered."""
+            kind = frame.get("kind")
+            if kind == "pong" or kind == "ask_form":
+                return
+            self.history.append(dict(frame))
+            if len(self.history) > HISTORY_CAP:
+                del self.history[0:len(self.history) - HISTORY_CAP]
+
+    CHATS: dict[str, ChatBox] = {}
+
+    async def chat_pub(box: "ChatBox", frame: dict[str, Any]) -> None:
+        """Publish to every socket viewing THIS chat, and into its
+        frame log. Dead sockets are dropped, never fatal."""
+        box.log(frame)
+        for sock in list(box.sockets):
             try:
                 await sock.send_json(frame)
             except Exception:  # noqa: BLE001
-                SOCKETS.discard(sock)
+                box.sockets.discard(sock)
 
-    async def repaint_chain(broadcast_tree: bool = False,
-                            **tree_extra) -> None:
-        """Repaint every tab with the ACTIVE chain -- and REPLACE the
-        history log with exactly the frames sent, so a later connect
-        replays the current branch, not a pile-up of every branch ever
-        painted. Used by tree_switch and /session load."""
+    async def repaint_sockets(box: "ChatBox", socks: set,
+                              broadcast_tree: bool = False,
+                              **tree_extra) -> None:
+        """Repaint the given sockets of one chat with its ACTIVE chain,
+        replacing the chat's frame log with exactly the frames sent
+        (so a later connect replays the current branch)."""
         frames: list[dict[str, Any]] = [{"kind": "clear"},
                                          {"kind": "restore_begin"}]
-        frames.extend(ui.render_history(ui.session.messages))
-        frames.extend(ui.render_images())
+        frames.extend(box.ui.render_history(box.ui.session.messages))
+        frames.extend(box.ui.render_images())
         frames.append({"kind": "restore_end"})
         if broadcast_tree:
-            frames.append({"kind": "tree", **TREE.describe(),
+            frames.append({"kind": "tree", **box.tree.describe(),
                            **tree_extra})
-        HISTORY.clear()
-        HISTORY.extend(dict(f) for f in frames)
+        box.history.clear()
         for frame in frames:
-            await send_pub(dict(frame))
+            box.log(frame)
+        for frame in frames:
+            for sock in list(socks):
+                try:
+                    await sock.send_json(frame)
+                except Exception:  # noqa: BLE001
+                    if sock in box.sockets:
+                        box.sockets.discard(sock)
+                    socks.discard(sock)
 
-    # -- ONE server-side session, every connection a view onto it -----------
-    # Session management is entirely server-side: a single WebChat/engine
-    # session lives for the server's lifetime; every tab connects, gets
-    # the CURRENT transcript replayed, and receives every live frame.
-    # No per-socket session building, no per-connect autosave restore to
-    # get right -- a connect cannot fail to show the conversation,
-    # because the conversation IS the server's state.
-    ui = WebChat(None, client, config,
-                 tool_output=chat_config.tool_output,
-                 show_thinking=config.show_thinking)
-    ui.set_gen_registry(GEN)
-    ui.set_relay_publisher(send_pub)
-    #: The conversation graph: the context window is the root, every
-    #: turn a node, branches orthogonal paths off any node. Built
-    #: BEFORE the session manager so saves carry it.
-    TREE = TurnTree()
-    sessions = SessionManager(ui, tree=TREE)
-    #: The engine session adopts the autosave at STARTUP, so a server
-    #: restart continues the conversation too -- and the tree restores
-    #: from the same file when one was saved (branch structure and the
-    #: active leaf survive restarts); a treeless file falls back to
-    #: adopting the flat messages as one chain.
-    try:
-        sessions.load(SessionManager.AUTOSAVE)
-    except Exception:  # noqa: BLE001 - a bad file is a fresh chat
-        pass
-    # If the operator was in a NAMED session when the server restarted,
-    # the autosave slot carries that conversation and its marker: pivot
-    # the active document back to it, so the continuation writes into
-    # the named session's own file -- each session keeps its own graph.
-    restored_active = getattr(sessions, "loaded_active", None)
-    if restored_active and any(
-            row["name"] == restored_active
-            for row in sessions.listing()):
-        sessions.active_session = restored_active
-    restored_tree = getattr(sessions, "loaded_tree", None)
-    if isinstance(restored_tree, dict) and TREE.from_json(restored_tree):
-        # The tree restored. Re-project the engine messages from the
-        # ACTIVE chain so session state and tree agree exactly, even
-        # if the file's flat `messages` drifted from the last save.
-        sysmsgs = [m for m in ui.session.messages
-                   if m.get("role") == "system"]
-        ui.session.messages[:] = sysmsgs + \
-            TREE.messages_for(TREE.active)
-    else:
-        TREE.adopt(ui.session.messages)
-    #: One turn at a time: two tabs typing at once serialize here.
+    def build_chat(name: str) -> "ChatBox":
+        """Build a chat from its session file (or fresh when the file
+        is absent), wire its renders to its own publisher, and register
+        it. The name is the session file stem: the chat IS the file."""
+        ui = WebChat(None, client, config,
+                     tool_output=chat_config.tool_output,
+                     show_thinking=config.show_thinking)
+        ui.set_gen_registry(GEN)
+        tree = TurnTree()
+        sessions = SessionManager(ui, tree=tree)
+        box = ChatBox(name, ui, tree, sessions)
+        ui.set_relay_publisher(
+            lambda frame: asyncio.ensure_future(chat_pub(box, frame)))
+        ui._frame_out = lambda payload: asyncio.ensure_future(
+            chat_pub(box, payload))
+        sessions.active_session = name
+        loaded_tree = None
+        try:
+            ok, _note = sessions.load(name)
+            if ok:
+                loaded_tree = getattr(sessions, "loaded_tree", None)
+        except Exception:  # noqa: BLE001 - a bad file is a fresh chat
+            pass
+        if isinstance(loaded_tree, dict) and tree.from_json(loaded_tree):
+            sysmsgs = [m for m in ui.session.messages
+                       if m.get("role") == "system"]
+            ui.session.messages[:] = sysmsgs + \
+                tree.messages_for(tree.active)
+        else:
+            tree.adopt(ui.session.messages)
+        CHATS[name] = box
+        return box
+
+    def get_or_build_chat(name: str) -> "ChatBox":
+        """The live in-memory chat wins over the file: a chat already
+        open keeps its unsaved state (an in-flight turn, a fresh
+        /clear) rather than being reverted by a disk re-read."""
+        return CHATS.get(name) or build_chat(name)
+
+    def fresh_chat_name() -> str:
+        """A unique, human-readable name for a new chat."""
+        base = time.strftime("chat-%Y%m%d-%H%M%S")
+        name, n = base, 2
+        while (sessions_dir / f"{name}.json").exists() \
+                or name in CHATS:
+            name = f"{base}-{n}"
+            n += 1
+        return name
+
+    from rt_harness.infotools import _session_dir
+    sessions_dir = _session_dir()
+
+    #: The chat a new connect lands in: the most recently modified
+    # session file (the operator's last conversation), the scratch
+    # slot when one exists, else a brand-new chat. The old autosave
+    # marker (active_session) pivots the same way it did before.
+    def initial_chat() -> "ChatBox":
+        try:
+            paths = sorted(sessions_dir.glob("*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            paths = []
+        if not paths:
+            return build_chat(fresh_chat_name())
+        name = paths[0].stem
+        if name == SessionManager.AUTOSAVE:
+            # the scratch slot may carry the named-doc marker: pivot
+            try:
+                import json as _json
+                data = _json.loads(
+                    (sessions_dir / f"{SessionManager.AUTOSAVE}.json")
+                    .read_text(encoding="utf-8"))
+                marker = str(data.get("active_session") or "")
+                if marker and (sessions_dir / f"{marker}.json").is_file():
+                    name = marker
+            except (OSError, ValueError):
+                pass
+        return get_or_build_chat(name)
+
+    #: One generation at a time, server-wide: the card, the swap chain
+    #: and the router are shared hardware, not per-chat state. Two
+    #: chats' turns serialize here exactly the way two tabs' did.
     TURN_LOCK = asyncio.Lock()
-
-    # WebChat._frame normally sends to its own socket; the shared
-    # session has none. Route its renders to the publisher instead:
-    # every render reaches every tab and lands in the history log.
-    ui._frame_out = lambda payload: asyncio.ensure_future(
-        send_pub(payload))
 
     def log_frame(run: dict[str, Any] | None, frame: dict[str, Any]) -> None:
         """Record into the active run's replay log. SYNCHRONOUS and
@@ -3288,10 +3351,14 @@ def main() -> int:
     async def bcast_pub(frame: dict[str, Any]) -> None:
         """The ONE publisher every generation path uses (dialog, typed
         /image, model tool-call): record into the active run, then send
-        to every live socket. A run outlives whichever socket started
-        it; dead sockets are dropped, never fatal."""
-        log_frame(GEN["active"], frame)
-        await send_pub(frame)
+        to the chat that owns it. A run outlives whichever socket
+        started it; dead sockets are dropped, never fatal. The owning
+        chat is carried ON the run (GEN active runs gain a 'box')."""
+        run = GEN["active"]
+        log_frame(run, frame)
+        box = (run or {}).get("box")
+        if box is not None:
+            await chat_pub(box, frame)
 
     def retire_run() -> dict[str, Any] | None:
         """Close the active run: terminal frames land in the replay log
@@ -3307,17 +3374,21 @@ def main() -> int:
             GEN["active"] = None
         return run
 
-    async def send_terminal_frames() -> None:
-        """The turn-close frames every live page needs (even ones that
-        never saw this run): turn_end then busy off. Best-effort."""
-        for sock in list(SOCKETS):
+    async def send_terminal_frames(box: "ChatBox") -> None:
+        """The turn-close frames every page viewing this chat needs:
+        turn_end then busy off. Best-effort."""
+        for sock in list(box.sockets):
             try:
                 await sock.send_json({"kind": "turn_end"})
                 await sock.send_json({"kind": "busy", "on": False})
             except Exception:  # noqa: BLE001
-                SOCKETS.discard(sock)
+                box.sockets.discard(sock)
 
-    async def do_cancel(sock: "WebSocket") -> None:
+    async def pub(box: "ChatBox", frame: dict[str, Any]) -> None:
+        """Shorthand inside cancel/turn paths: publish to one chat."""
+        await chat_pub(box, frame)
+
+    async def do_cancel(box: "ChatBox", sock: "WebSocket") -> None:
         """The one Cancel path for every generation kind.
 
         - text turn: flip the client's cancel flag -- the stream loop
@@ -3352,7 +3423,7 @@ def main() -> int:
                     state = json.loads(r.read())
             except Exception:  # noqa: BLE001 - no supervisor reachable
                 state = {}
-            await send_pub({
+            await pub({
                 "kind": "notice",
                 "text": "cancel: bringing the GPU back to the llm "
                         "service (the image generation is stopped)"})
@@ -3362,11 +3433,11 @@ def main() -> int:
                     headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(request, timeout=140) as r:
                     json.loads(r.read())
-                await send_pub({
+                await pub({
                     "kind": "notice",
                     "text": "the llm service is back"})
             except Exception as exc:  # noqa: BLE001
-                await send_pub({
+                await pub({
                     "kind": "error",
                     "text": f"cancel: could not restore the llm "
                             f"service: {exc}"})
@@ -3382,24 +3453,24 @@ def main() -> int:
             GEN["last"] = run
             GEN["active"] = None
             try:
-                await send_pub({"kind": "notice",
+                await pub({"kind": "notice",
                                 "text": "generation cancelled"})
-                await send_pub({"kind": "turn_end"})
-                await send_pub({"kind": "busy", "on": False})
+                await pub({"kind": "turn_end"})
+                await pub({"kind": "busy", "on": False})
             except Exception:  # noqa: BLE001
                 pass
         else:
             # text turn: cooperative, through the client flag. The
             # engine's own turn_end + busy-off frames follow when the
             # stream unwinds; nothing more to send here.
-            cancel = getattr(ui.session.client, "cancel_turn", None)
+            cancel = getattr(box.ui.session.client, "cancel_turn", None)
             if callable(cancel):
                 cancel()
-                await send_pub({
+                await pub({
                     "kind": "notice",
                     "text": "generation cancelled"})
             else:
-                await send_pub({
+                await pub({
                     "kind": "notice",
                     "text": "this client cannot cancel mid-turn"})
 
@@ -3410,13 +3481,13 @@ def main() -> int:
         # finally -- the run was retired above, but the busy dots and
         # the send/cancel button key on the `busy` flag, so close the
         # visible turn here too. Idempotent with the frames above.
-        if current_task["task"] is not None:
-            current_task["task"] = None
+        if box.task is not None:
+            box.task = None
         if GEN["active"] is None and not getattr(
                 ui, "_inference_in_progress", False):
             try:
-                await send_pub({"kind": "turn_end"})
-                await send_pub({"kind": "busy", "on": False})
+                await pub({"kind": "turn_end"})
+                await pub({"kind": "busy", "on": False})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -3426,41 +3497,42 @@ def main() -> int:
     async def ws_endpoint(websocket: WebSocket) -> None:
         nonlocal saved_theme
         await websocket.accept()
-        # The shared WebChat is built BEFORE uvicorn runs its loop, so
-        # the loop it captured at __init__ is dead. Every engine render
-        # schedules through call_soon_threadsafe -- rebind to the LIVE
-        # loop on the first connection (and idempotently after).
-        ui._loop = asyncio.get_running_loop()
-        # Session management is entirely SERVER-SIDE: one engine session
-        # for the server's lifetime, every connection a view onto it.
-        # Connect = replay the server's frame history, then subscribe to
-        # live frames. No per-connect session build, no autosave-load
-        # heuristics that can leave the page blank -- the conversation
-        # is the server's state, not a guess rebuilt from disk.
+        # A socket connects INTO a chat: the most recent conversation
+        # for a plain page open, or the chat named in the URL (?chat=)
+        # for a session-switch connect. From here every frame this
+        # socket sees belongs to that chat, and every op it sends runs
+        # against that chat.
+        want = str(websocket.query_params.get("chat") or "").strip()
+        box = (get_or_build_chat(want) if want else initial_chat())
+        # A WebChat built before this loop runs holds a dead loop ref;
+        # rebind the LIVE loop so call_soon_threadsafe renders work.
+        box.ui._loop = asyncio.get_running_loop()
+        # Connect = meta + this chat's frame log replay + live frames
+        # for this chat only.
         await websocket.send_json({
-            "kind": "meta", "model": ui.session.config.model,
-            "protocol": ui.session.protocol,
-            "num_ctx": ui.session.config.num_ctx,
+            "kind": "meta", "model": box.ui.session.config.model,
+            "protocol": box.ui.session.protocol,
+            "num_ctx": box.ui.session.config.num_ctx,
             "theme": saved_theme or "k0b0l-dark",
-            "reasoning": ("auto" if ui.session.config.thinking is None
-                          else ("on" if ui.session.config.thinking
+            "reasoning": ("auto" if box.ui.session.config.thinking is None
+                          else ("on" if box.ui.session.config.thinking
                                 else "off")),
-            "imagetool": not ui.session.config.no_image_tool,
-            "restored": len(HISTORY) > 0,
+            "imagetool": not box.ui.session.config.no_image_tool,
+            "chat": box.name,
+            "restored": len(box.history) > 0,
         })
-        # The transcript replay: everything the server has rendered this
-        # run, exactly as a live tab saw it -- chat turns, tool panels,
-        # image runs (their frames live in HISTORY too, and the images
-        # themselves on disk). Bracketed so the page paints it once.
-        if HISTORY:
+        # The transcript replay: everything this chat has rendered,
+        # exactly as a live tab saw it. Bracketed so the page paints
+        # it once.
+        if box.history:
             await websocket.send_json({"kind": "restore_begin"})
-            for frame in HISTORY:
+            for frame in box.history:
                 await websocket.send_json(frame)
             await websocket.send_json({"kind": "restore_end"})
         loop = asyncio.get_event_loop()
-        SOCKETS.add(websocket)
+        box.sockets.add(websocket)
 
-        async def run_turn(text: str) -> None:
+        async def run_turn(box: "ChatBox", text: str) -> None:
             """One text turn: swap-state probe, model reload notice, engine
             ask, tree bookkeeping, autosave. The body is the old inline
             block; the finally always closes the turn so a cancel can never
@@ -3468,7 +3540,7 @@ def main() -> int:
             # -- tree bookkeeping: the turn runs against the ACTIVE
             # chain; record the node when the turn completes.
             tree_turn_user = text
-            tree_prior = len(ui.session.messages)
+            tree_prior = len(box.ui.session.messages)
             # The GPU is one card shared with image generation. After an
             # image turn the model is merely unloaded (slow reload); after
             # a swap the whole llm service is *down* and the turn would
@@ -3483,8 +3555,8 @@ def main() -> int:
                 swap_state = None
             async with TURN_LOCK:
                 if swap_state and not swap_state.get("llm", True):
-                    await send_pub({"kind": "busy", "on": True})
-                    await send_pub({
+                    await pub(box, {"kind": "busy", "on": True})
+                    await pub(box, {
                         "kind": "notice",
                         "text": "the llm service is down — the GPU was "
                                 "swapped to image generation; swapping "
@@ -3497,15 +3569,15 @@ def main() -> int:
                         with urllib.request.urlopen(
                                 request, timeout=140) as r:
                             json.loads(r.read())
-                        await send_pub({
+                        await pub(box, {
                             "kind": "notice",
                             "text": "the llm service is back"})
                     except Exception as exc:  # noqa: BLE001
-                        await send_pub({
+                        await pub(box, {
                             "kind": "notice",
                             "text": f"could not restore the llm "
                                     f"service: {exc}"})
-                    await send_pub({"kind": "busy", "on": False})
+                    await pub(box, {"kind": "busy", "on": False})
             # A swapped-away model reloads its weights on this turn:
             # 10-40 s for the 8B, ~130 s for the 14B, and until the
             # first token there is no frame at all. Say so before the
@@ -3515,53 +3587,53 @@ def main() -> int:
             except Exception:  # noqa: BLE001 - a probe must not kill the turn
                 rows = []
             for row in rows:
-                if (str(row.get("id")) == ui.session.config.model
+                if (str(row.get("id")) == box.ui.session.config.model
                         and str(row.get("state", "")).lower()
                         == "unloaded"):
-                    await send_pub({
+                    await pub(box, {
                         "kind": "notice",
-                        "text": f"loading {ui.session.config.model} "
+                        "text": f"loading {box.ui.session.config.model} "
                                 "(weights were swapped off the "
                                 "card; this can take a minute)"})
                     break
-            await loop.run_in_executor(None, ui.ask, text)
+            await loop.run_in_executor(None, box.ui.ask, text)
             # Tree bookkeeping: the engine appended the user message
             # AND its response to session.messages; the node's own
             # `user` text is tree_turn_user, so the node's content
             # is ONLY what followed the user row (dropping the
             # duplicate user entry messages_for would re-add).
-            tree_msgs = ui.session.messages[tree_prior:]
+            tree_msgs = box.ui.session.messages[tree_prior:]
             resp_only = tree_msgs[1:] if (
                 tree_msgs and tree_msgs[0].get("role") == "user"
                 and str(tree_msgs[0].get("content", "")) == tree_turn_user
             ) else tree_msgs
-            nid = TREE.append_turn(tree_turn_user, list(resp_only))
-            await send_pub({"kind": "tree", **TREE.describe(),
+            nid = box.tree.append_turn(tree_turn_user, list(resp_only))
+            await pub(box, {"kind": "tree", **box.tree.describe(),
                             "new_node": nid})
             # Autosave after every completed turn: "restore last
             # session" must mean the conversation as it stands, not
             # as it stood when the operator last remembered to save.
             try:
-                sessions.autosave()
+                box.sessions.autosave()
             except Exception:  # noqa: BLE001 - persistence is best-effort
                 pass
 
-        async def dispatch_turn(text: str) -> None:
+        async def dispatch_turn(box: "ChatBox", text: str) -> None:
             """Wrap a slash command or a plain turn as a task, holding the
             TURN_LOCK only for the actual work (the lock is held while the
             engine streams, so two tasks cannot interleave)."""
             nonlocal_history_note = None  # placeholder to keep locals minimal
             if text.startswith("/"):
-                await send_pub({"kind": "you", "text": text})
+                await pub(box, {"kind": "you", "text": text})
                 if text in ("/exit", "/quit", "/q"):
-                    await send_pub(
+                    await pub(box, 
                         {"kind": "notice", "text": "the web session "
                          "stays; just close the tab"})
-                    await send_pub({"kind": "turn_end"})
+                    await pub(box, {"kind": "turn_end"})
                     return
                 async with TURN_LOCK:
                     handled = await loop.run_in_executor(
-                        None, ui.dispatch, text)
+                        None, box.ui.dispatch, text)
                     # The dispatch ran on the EXECUTOR: its line()
                     # renders were scheduled onto this loop via
                     # call_soon_threadsafe and may still be QUEUED.
@@ -3574,36 +3646,36 @@ def main() -> int:
                     # hop; sleep(0) does not reliably cross it).
                     await asyncio.sleep(0.2)
                     if not handled:
-                        await send_pub(
+                        await pub(box, 
                             {"kind": "raw", "text": text})
                     if text.split()[0].lower() in ("/clear",):
                         # The shared session was reset server-side;
                         # EVERY tab's transcript must follow, and the
                         # frame log IS the new (empty) transcript.
-                        HISTORY.clear()
-                        await send_pub({"kind": "clear"})
+                        box.history.clear()
+                        await pub(box, {"kind": "clear"})
                         # /clear starts a FRESH document: pivot the
                         # autosave target back to the scratch slot so
                         # the new conversation can never write over a
                         # named session's file. The named graph keeps
                         # its own tree on disk, untouched.
-                        sessions.start_fresh()
-                        TREE.__init__()
-                        await send_pub({"kind": "tree",
-                                        **TREE.describe()})
-                    await send_pub({"kind": "turn_end"})
+                        box.sessions.start_fresh()
+                        box.tree.__init__()
+                        await pub(box, {"kind": "tree",
+                                        **box.tree.describe()})
+                    await pub(box, {"kind": "turn_end"})
                 # Slash commands can change the live session (/clear,
                 # /session load, /model): keep the autosave slot in
                 # sync, or a reconnect restores a stale conversation.
                 try:
-                    sessions.autosave()
+                    box.sessions.autosave()
                 except Exception:  # noqa: BLE001 - persistence is best-effort
                     pass
                 return
-            await send_pub({"kind": "you", "text": text})
-            await run_turn(text)
+            await pub(box, {"kind": "you", "text": text})
+            await run_turn(box, text)
 
-        async def run_image_op(img: dict[str, Any]) -> None:
+        async def run_image_op(box: "ChatBox", img: dict[str, Any]) -> None:
             """One image generation (the dialog / typed op) as its own
             task: the receive loop stays live, so a Cancel click from
             the same tab mid-generation is actually heard. Body is the
@@ -3640,7 +3712,7 @@ def main() -> int:
                             if k not in ("init_image_b64",
                                          "mask_b64")}
                 my_run = {"frames": [], "request": req_echo,
-                          "ended": 0.0}
+                          "ended": 0.0, "box": box}
                 GEN["active"] = my_run
                 # The user's own row echoes the request whole.
                 await bcast_pub({
@@ -3659,7 +3731,7 @@ def main() -> int:
                              "(swap / weight load)",
                     "step": 0, "total": 0})
                 out_dir = Path(
-                    str(ui.session.workspace.root)) / "images"
+                    str(box.ui.session.workspace.root)) / "images"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 stamp = int(time.time())
                 out_name = f"{model}-{stamp}"
@@ -3855,9 +3927,9 @@ def main() -> int:
                     # complete and closed -- best-effort.
                     try:
                         for frame in after:
-                            await send_pub(frame)
-                        await send_pub({"kind": "turn_end"})
-                        await send_pub({"kind": "busy", "on": False})
+                            await chat_pub(box, frame)
+                        await chat_pub(box, {"kind": "turn_end"})
+                        await chat_pub(box, {"kind": "busy", "on": False})
                     except Exception:  # noqa: BLE001
                         pass
                 return
@@ -3895,14 +3967,14 @@ def main() -> int:
             req_echo_plain = dict(args)
             my_run = {"frames": [],
                       "request": req_echo_plain,
-                      "ended": 0.0}
+                      "ended": 0.0, "box": box}
             GEN["active"] = my_run
             # This WebChat's own renders (the tool's notices,
             # gen_progress, show_image) ARE the run's frames:
             # attach the replay log before the first echo, and
             # relay them to peer tabs live.
-            ui.set_gen_log(my_run["frames"])
-            ui.set_relay(send_pub)
+            box.ui.set_gen_log(my_run["frames"])
+            box.ui.set_relay(None)  # the run carries its box; bcast_pub routes
             await bcast_pub({
                 "kind": "you",
                 "text": f"/image {model} {prompt}"})
@@ -3914,7 +3986,7 @@ def main() -> int:
                 "step": 0, "total": 0})
 
             def run_image(args=args):
-                return ui.session.workspace.call(
+                return box.ui.session.workspace.call(
                     "generate_image", args)
 
             result = None
@@ -3926,9 +3998,8 @@ def main() -> int:
                     "kind": "error",
                     "text": f"image generation failed: {exc}"})
             finally:
-                ui.set_gen_log(None)
-                ui.set_relay(None)
-                # Result frames exist; log them SYNC, then retire,
+                box.ui.set_gen_log(None)
+                        # Result frames exist; log them SYNC, then retire,
                 # then network-send. Same ordering contract as
                 # the dialog path.
                 after: list[dict[str, Any]] = []
@@ -3963,9 +4034,9 @@ def main() -> int:
                 retire_run()
                 try:
                     for frame in after:
-                        await send_pub(frame)
-                    await send_pub({"kind": "turn_end"})
-                    await send_pub({"kind": "busy", "on": False})
+                        await chat_pub(box, frame)
+                    await chat_pub(box, {"kind": "turn_end"})
+                    await chat_pub(box, {"kind": "busy", "on": False})
                 except Exception:  # noqa: BLE001
                     pass
             return
@@ -3989,68 +4060,59 @@ def main() -> int:
                     if verb == "list":
                         await websocket.send_json({
                             "kind": "session_list",
-                            "sessions": sessions.listing()})
+                            "sessions": box.sessions.listing()})
+                        continue
+                    if verb == "new":
+                        # A brand-new chat: build it, rebind THIS socket,
+                        # repaint the socket alone. Other tabs keep
+                        # their own conversations.
+                        newbox = build_chat(fresh_chat_name())
+                        box.sockets.discard(websocket)
+                        box = newbox
+                        box.sockets.add(websocket)
+                        await repaint_sockets(box, {websocket})
+                        await pub(box, {"kind": "notice",
+                                        "text": f"new chat: {box.name}"})
                         continue
                     if verb == "load":
-                        ok, note = sessions.load(name)
-                        # Loading REPLACES the server-side conversation:
-                        # repaint goes to EVERY tab through repaint_chain
-                        # (which also replaces HISTORY, so a later connect
-                        # replays the loaded session only). The tree
-                        # restores from the file's graph when it has one;
-                        # a flat file adopts as a single chain.
-                        TREE.__init__()
-                        loaded_tree = getattr(sessions, "loaded_tree", None)
-                        if isinstance(loaded_tree, dict) \
-                                and TREE.from_json(loaded_tree):
-                            pass
-                        else:
-                            TREE.adopt(ui.session.messages)
-                        await repaint_chain(broadcast_tree=True)
-                        # THE per-session graph contract: a loaded named
-                        # session becomes the ACTIVE document -- its
-                        # turns (and its graph edits: branches, switches)
-                        # autosave into ITS file, not the shared slot.
-                        # Each session maintains its own tree from here.
-                        if ok and name:
-                            sessions.adopt_document(name)
-                            await send_pub({
-                                "kind": "notice",
-                                "text": note + " — this session now "
-                                        "maintains its own graph"})
-                        else:
-                            await send_pub({
-                                "kind": "notice", "text": note})
-                        sessions.autosave()
+                        # Chat semantics: loading a session REBINDS this
+                        # socket to that chat. The chat builds from its
+                        # file when it is not already live (a live chat
+                        # wins -- it may hold unsaved turns). Every
+                        # OTHER tab keeps whatever it was viewing: no
+                        # bleed-over, no global repaint.
+                        target = get_or_build_chat(name)
+                        box.sockets.discard(websocket)
+                        box = target
+                        box.sockets.add(websocket)
+                        await repaint_sockets(box, {websocket},
+                                              broadcast_tree=True)
+                        await pub(box, {"kind": "meta",
+                                       "chat": box.name})
                         continue
                     if verb == "save":
-                        note = sessions.save(name or "web-session")
+                        note = box.sessions.save(name or box.name)
                         await websocket.send_json({
                             "kind": "notice", "text": note})
                         continue
                     if verb == "delete":
-                        ok, note = sessions.delete(name)
+                        ok, note = box.sessions.delete(name)
                         await websocket.send_json({
                             "kind": "notice", "text": note})
-                        # A deleted session must not resurrect from the
-                        # page's cache: if it was the live autosave,
-                        # reset the engine too, or the very next turn
-                        # re-autosaves the zombie conversation.
-                        if ok and name == SessionManager.AUTOSAVE:
-                            ui.session.reset()
-                            HISTORY.clear()
-                            await send_pub({"kind": "clear"})
-                        elif ok and sessions.drop_active(name):
-                            # The ACTIVE named document was deleted:
-                            # the pivot back to scratch happened; clear
-                            # the live conversation so its next autosave
-                            # cannot recreate the file we just removed.
-                            ui.session.reset()
-                            TREE.__init__()
-                            HISTORY.clear()
-                            await send_pub({"kind": "clear"})
-                            await send_pub({"kind": "tree",
-                                            **TREE.describe()})
+                        # A deleted chat must not resurrect: drop it from
+                        # the registry, and rebind any of its sockets
+                        # (including ours) to a fresh chat so the next
+                        # turn cannot autosave the zombie back.
+                        if ok:
+                            dead = CHATS.pop(name, None)
+                            if dead is not None:
+                                for sock in list(dead.sockets):
+                                    fresh = build_chat(fresh_chat_name())
+                                    dead.sockets.discard(sock)
+                                    fresh.sockets.add(sock)
+                                    await repaint_sockets(fresh, {sock})
+                                    if sock is websocket:
+                                        box = fresh
                         continue
 
                 img = message.get("image")
@@ -4058,11 +4120,11 @@ def main() -> int:
                     # The op runs as a TASK, not inline: the receive
                     # loop stays live so Cancel is hearable mid-run
                     # (same reason text turns became tasks).
-                    task = asyncio.ensure_future(run_image_op(img))
-                    current_task["task"] = task
-                    def _retire_img(t, h=current_task):
-                        if h["task"] is t:
-                            h["task"] = None
+                    task = asyncio.ensure_future(run_image_op(box, img))
+                    box.task = task
+                    def _retire_img(t, b=box):
+                        if b.task is t:
+                            b.task = None
                     task.add_done_callback(_retire_img)
                     continue
 
@@ -4102,16 +4164,16 @@ def main() -> int:
                     save_theme(wanted_theme)
                     saved_theme = wanted_theme
                     await websocket.send_json({
-                        "kind": "meta", "model": ui.session.config.model,
-                        "protocol": ui.session.protocol,
-                        "num_ctx": ui.session.config.num_ctx,
-                        "theme": wanted_theme})
+                        "kind": "meta", "model": box.ui.session.config.model,
+                        "protocol": box.ui.session.protocol,
+                        "num_ctx": box.ui.session.config.num_ctx,
+                        "theme": wanted_theme, "chat": box.name})
                     continue
                 # -- skills & core: the operator surface of what the
                 # session already knows (skills ride the system message;
                 # CORE.md is the identity it speaks through).
                 if message.get("skills_list") is True:
-                    skills = ui._skills()
+                    skills = box.ui._skills()
                     rows = []
                     for skill in skills:
                         rows.append({
@@ -4119,11 +4181,11 @@ def main() -> int:
                             "description": getattr(
                                 skill, "description", "") or "",
                             "enabled": skill.name
-                            in getattr(ui, "_selected_skills", []),
+                            in getattr(box.ui, "_selected_skills", []),
                         })
                     await websocket.send_json({
                         "kind": "skills", "skills": rows,
-                        "active": list(getattr(ui, "_selected_skills",
+                        "active": list(getattr(box.ui, "_selected_skills",
                                                []))})
                     continue
                 if isinstance(message.get("skills_set"), dict):
@@ -4135,21 +4197,21 @@ def main() -> int:
                             "kind": "notice",
                             "text": "skills_set needs a name"})
                         continue
-                    sel = getattr(ui, "_selected_skills", [])
+                    sel = getattr(box.ui, "_selected_skills", [])
                     if on and name not in sel:
                         sel.append(name)
                     if not on and name in sel:
                         sel.remove(name)
                     # Same contract as /skills enable|disable: the next
                     # system message carries the new doctrine set.
-                    ui.session.reset()
-                    HISTORY.clear()
-                    await send_pub({"kind": "clear"})
-                    await send_pub({"kind": "notice", "text":
+                    box.ui.session.reset()
+                    box.history.clear()
+                    await pub(box, {"kind": "clear"})
+                    await pub(box, {"kind": "notice", "text":
                                     f"skills active: "
                                     f"{', '.join(sel) or '(none)'}"})
-                    await send_pub({"kind": "turn_end"})
-                    sessions.autosave()
+                    await pub(box, {"kind": "turn_end"})
+                    box.sessions.autosave()
                     continue
                 # -- skill authoring: read / write / delete ------------
                 # The same contract as the TUI's SkillsEditor: the raw
@@ -4262,7 +4324,7 @@ def main() -> int:
                     # The index the model sees changed: rebuild prompts
                     # (same contract as skills_set -- session.reset so
                     # the next system message carries the new set).
-                    ui.session.reset()
+                    box.ui.session.reset()
                     continue
                 if isinstance(message.get("skills_delete"), dict):
                     req = message["skills_delete"]
@@ -4291,19 +4353,19 @@ def main() -> int:
                             "error": f"could not delete: {exc}"})
                         continue
                     # The pinned set must not keep a deleted name.
-                    sel = getattr(ui, "_selected_skills", [])
+                    sel = getattr(box.ui, "_selected_skills", [])
                     if name in sel:
                         sel.remove(name)
                     await websocket.send_json({
                         "kind": "skill_saved", "ok": True,
                         "deleted": name})
-                    ui.session.reset()
+                    box.ui.session.reset()
                     continue
                 if message.get("core_show") is True:
                     from rt_harness.soul import load_soul
 
-                    soul = load_soul(ui.session.config,
-                                     ui.session.workspace.root)
+                    soul = load_soul(box.ui.session.config,
+                                     box.ui.session.workspace.root)
                     await websocket.send_json({
                         "kind": "core", "text": soul.text if soul.loaded
                         else "", "path": str(soul.path or ""),
@@ -4316,25 +4378,25 @@ def main() -> int:
                         from_node = int(req.get("from", 0))
                     except (TypeError, ValueError):
                         from_node = 0
-                    if from_node not in TREE.nodes:
+                    if from_node not in box.tree.nodes:
                         await websocket.send_json({
                             "kind": "notice",
                             "text": f"no node {from_node} to branch from"})
                         continue
                     async with TURN_LOCK:
-                        fork = TREE.nodes[from_node]
-                        TREE.branch(from_node)
+                        fork = box.tree.nodes[from_node]
+                        box.tree.branch(from_node)
                         # The new path's context = the chain to the
                         # fork's parent. The NEXT prompt becomes the
                         # sibling node; nothing empty is recorded.
-                        sysmsgs = [m for m in ui.session.messages
+                        sysmsgs = [m for m in box.ui.session.messages
                                    if m.get("role") == "system"]
-                        ui.session.messages[:] = sysmsgs + \
-                            TREE.messages_for(TREE.active)
-                        await send_pub({"kind": "tree",
-                                        **TREE.describe(),
+                        box.ui.session.messages[:] = sysmsgs + \
+                            box.tree.messages_for(box.tree.active)
+                        await pub(box, {"kind": "tree",
+                                        **box.tree.describe(),
                                         "forked_from": from_node})
-                        await send_pub({
+                        await pub(box, {
                             "kind": "notice",
                             "text": "branched at that turn: your next "
                                     "prompt opens the new path; the old "
@@ -4347,30 +4409,32 @@ def main() -> int:
                         nid = int(req.get("node", 0))
                     except (TypeError, ValueError):
                         nid = 0
-                    if nid not in TREE.nodes:
+                    if nid not in box.tree.nodes:
                         await websocket.send_json({
                             "kind": "notice",
                             "text": f"no node {nid} to switch to"})
                         continue
                     async with TURN_LOCK:
-                        if not TREE.switch(nid):
+                        if not box.tree.switch(nid):
                             await websocket.send_json({
                                 "kind": "notice",
                                 "text": f"cannot switch to {nid}"})
                             continue
-                        # Repaint every tab with the new active chain:
-                        # the engine messages BECOME that chain.
-                        sysmsgs = [m for m in ui.session.messages
+                        # Repaint every tab of THIS chat with the new
+                        # active chain: the engine messages BECOME that
+                        # chain. Other chats are untouched.
+                        sysmsgs = [m for m in box.ui.session.messages
                                    if m.get("role") == "system"]
-                        ui.session.messages[:] = sysmsgs + \
-                            TREE.messages_for(TREE.active)
-                        await repaint_chain(broadcast_tree=True,
-                                            switched_to=nid)
-                        sessions.autosave()
+                        box.ui.session.messages[:] = sysmsgs + \
+                            box.tree.messages_for(box.tree.active)
+                        await repaint_sockets(box, set(box.sockets),
+                                              broadcast_tree=True,
+                                              switched_to=nid)
+                        box.sessions.autosave()
                     continue
                 if message.get("tree_show") is True:
                     await websocket.send_json({"kind": "tree",
-                                                **TREE.describe()})
+                                                **box.tree.describe()})
                     continue
                 # Cancel is checked BEFORE the empty-text guard on purpose:
                 # it carries no text field (the panel-button rule -- an
@@ -4383,7 +4447,7 @@ def main() -> int:
                 # verb. A late/second answer when nobody is waiting is
                 # ignored (the wait may have timed out already).
                 if isinstance(message.get("form_answer"), dict):
-                    wait = getattr(ui, "_form_wait", None)
+                    wait = getattr(box.ui, "_form_wait", None)
                     if wait is not None:
                         done, holder = wait
                         holder["answer"] = message["form_answer"].get(
@@ -4396,9 +4460,9 @@ def main() -> int:
                                     "(it may have timed out)"})
                     continue
                 if message.get("cancel") is True:
-                    if current_task["task"] is not None and \
-                            not current_task["task"].done():
-                        await do_cancel(websocket)
+                    if box.task is not None and \
+                            not box.task.done():
+                        await do_cancel(box, websocket)
                         continue
                     await websocket.send_json({
                         "kind": "notice",
@@ -4413,17 +4477,17 @@ def main() -> int:
                 # runs are refused with a notice (one engine turn at a
                 # time; TURN_LOCK serializes anyway, but the operator
                 # should hear why their message did not go).
-                begin = getattr(ui.session.client, "begin_turn", None)
+                begin = getattr(box.ui.session.client, "begin_turn", None)
                 if callable(begin):
                     begin()
-                task = asyncio.ensure_future(dispatch_turn(text))
-                current_task["task"] = task
+                task = asyncio.ensure_future(dispatch_turn(box, text))
+                box.task = task
                 # Free the handle when the task ends so Cancel knows
                 # there is nothing left to stop (a done task's Cancel
                 # click answers "nothing is running" honestly).
-                def _retire(t, h=current_task):
-                    if h["task"] is t:
-                        h["task"] = None
+                def _retire(t, b=box):
+                    if b.task is t:
+                        b.task = None
                 task.add_done_callback(_retire)
         except WebSocketDisconnect:
             pass
@@ -4435,10 +4499,11 @@ def main() -> int:
             # a disconnect -- the finally below drops the socket.
             pass
         finally:
-            SOCKETS.discard(websocket)
-            # The engine session is shared and outlives this socket:
-            # nothing to close here -- one tab closing must not tear
-            # down the conversation every other tab still sees.
+            # The chat outlives this socket: drop the socket from its
+            # viewer set; the conversation (and every other tab
+            # viewing it) keeps going.
+            for chat in CHATS.values():
+                chat.sockets.discard(websocket)
 
     async def image(request):
         rel = request.path_params["path"]
