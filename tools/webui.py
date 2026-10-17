@@ -1548,6 +1548,10 @@ function wireSocket() {
       transcript.innerHTML = "";
       turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null; genBar = null; genLabel = null;
+      // a cleared conversation cannot answer its pending question:
+      // close the dialog if it belongs to this chat
+      if (formDialog.open && (!formDialog._chat ||
+          formDialog._chat === currentChat)) { formDialog.close(); }
       try { localStorage.removeItem(CACHE_KEY); } catch (err) {}
       break;
     case "session_list":
@@ -1557,6 +1561,10 @@ function wireSocket() {
       // the model asked the operator to fill a form: a modal dialog
       // opens on every tab; answering sends form_answer (any tab).
       openAskForm(m);
+      break;
+    case "ask_form_close":
+      // answered (or cancelled) elsewhere: close the dialog here too
+      if (formDialog.open) { formDialog.close(); }
       break;
     case "skills":
       renderSkills(m.skills || [], m.active || []);
@@ -1801,6 +1809,7 @@ function renderSessionList(entries) {
     sub.className = "sess-sub";
     const when = s.mtime ? new Date(s.mtime * 1000).toLocaleString() : "";
     sub.textContent = (s.live ? "● open · " : "") +
+      (s.asking ? "❓ asking · " : "") +
       (s.turns || 0) + " turns · " +
       (s.messages || 0) + " msgs · " + when +
       (s.preview ? " · " + s.preview : "");
@@ -2323,7 +2332,10 @@ function buildFormField(item, values, host) {
 function sendFormAnswer(values) {
   formDialog.close();
   try {
-    ws.send(JSON.stringify({ form_answer: { values: values } }));
+    ws.send(JSON.stringify({ form_answer: {
+      values: values,
+      chat: formDialog._chat || currentChat || "",
+    } }));
   } catch (err) { /* dead socket: the wait times out server-side */ }
 }
 document.getElementById("form-send").addEventListener("click", () => {
@@ -2336,14 +2348,20 @@ document.getElementById("form-cancel").addEventListener("click", () => {
 });
 
 function openAskForm(m) {
+  // A question may arrive from a chat this tab is NOT viewing (the
+  // server surfaces pending forms to every socket). The dialog names
+  // the chat, and the answer routes INTO that chat.
+  const chat = m.chat || currentChat;
   document.getElementById("form-title").textContent =
-    m.prompt || "a question for you";
+    (chat && chat !== currentChat ? "[" + chat + "] " : "")
+    + (m.prompt || "a question for you");
   formFields.innerHTML = "";
   const values = {};
   for (const item of m.items || []) {
     buildFormField(item, values, formFields);
   }
   formDialog._values = values;
+  formDialog._chat = chat;
   formDialog.showModal();
   const firstText = formFields.querySelector(".form-text");
   if (firstText) firstText.focus();
@@ -2471,10 +2489,17 @@ class WebChat(ChatUI):
 
     # -- ask_user_choice bridge: executor <-> page dialog -----------------
     def ask_form(self, spec: dict[str, Any]) -> dict[str, Any] | None:
-        """Render a structured form on every tab and block for the
-        answer. Called on the EXECUTOR thread by the tool, so the
-        frames go out through the normal _frame path and the wait is a
-        threading.Event -- never an await.
+        """Queue a structured form on the OWNING CHAT and block for
+        the answer -- independent of whether anyone is viewing that
+        chat right now. Called on the EXECUTOR thread by the tool.
+
+        The form is recorded server-side (the chat's pending_form) and
+        surfaced to EVERY live socket -- the operator's rule: a
+        question must not depend on the session being open and active.
+        Any tab may open it; the frame names the chat so a foreign tab
+        answers INTO the right conversation. A socket that joins the
+        chat later replays the pending form on connect; the dialog
+        stays until answered or cancelled.
 
         The answer arrives as a ``form_answer`` socket message; the
         handler stores it and sets the event. A dialog Cancel answers
@@ -2485,16 +2510,37 @@ class WebChat(ChatUI):
         done = threading.Event()
         holder: dict[str, Any] = {}
         self._form_wait = (done, holder)
-        # the frame carries the whole spec; the page builds the dialog
-        self._frame({"kind": "ask_form", "prompt": spec.get("prompt", ""),
-                     "items": spec.get("items", [])})
+        frame = {"kind": "ask_form", "prompt": spec.get("prompt", ""),
+                 "items": spec.get("items", []),
+                 "chat": getattr(self, "_chat_box_name", "") or ""}
+        # Queue server-side: the question survives no-viewer windows,
+        # reconnects, and joins after the asking turn started.
+        hook = getattr(self, "_chat_queue_form", None)
+        if callable(hook):
+            hook(frame)
+        # Surface to every live socket in every chat (not just the
+        # owning chat's viewers): any tab may answer.
+        surface = getattr(self, "_chat_surface_form", None)
+        if callable(surface):
+            try:
+                surface(frame)
+            except Exception:  # noqa: BLE001 - surfacing is best-effort
+                pass
+        else:
+            self._frame(frame)
         # One turn blocks here up to 10 minutes; the operator may be
         # thinking. A vanished page is covered by the timeout -- the
         # tool reports honestly rather than wedging the turn forever.
         if not done.wait(timeout=600):
             self._form_wait = None
+            unqueue = getattr(self, "_chat_unqueue_form", None)
+            if callable(unqueue):
+                unqueue()
             raise TimeoutError("no form answer within 600s")
         self._form_wait = None
+        unqueue = getattr(self, "_chat_unqueue_form", None)
+        if callable(unqueue):
+            unqueue()
         return holder.get("answer")
 
     def set_relay(self, publisher) -> None:
@@ -3228,6 +3274,14 @@ def main() -> int:
             #: this chat's image files (names under images/), in
             #: generation order. A chat repaints only its own images.
             self.images: list[str] = []
+            #: The chat's UNANSWERED ask_form, when one is pending:
+            #: the full frame, kept server-side so the question
+            #: survives connects, reconnects and no-viewer windows.
+            #: None when no question is waiting. ask_form frames are
+            #: still never frame-LOGGED (a replay would re-ask an
+            #: answered question); this slot is the live surface
+            #: contract instead: a join replays it, a list badges it.
+            self.pending_form: dict[str, Any] | None = None
 
         def log(self, frame: dict[str, Any]) -> None:
             """Record into this chat's frame log (bounded). ask_form is
@@ -3251,6 +3305,23 @@ def main() -> int:
                 await sock.send_json(frame)
             except Exception:  # noqa: BLE001
                 box.sockets.discard(sock)
+
+    async def broadcast_all(frame: dict[str, Any],
+                            exclude: set = frozenset()) -> None:
+        """Publish a frame to EVERY live socket across all chats --
+        the ask_form surface. The operator's rule: a question the
+        model asked must not depend on the session being open and
+        active; any tab may surface it, and any tab may answer."""
+        for other in list(CHATS.values()):
+            if not other.sockets:
+                continue
+            for sock in list(other.sockets):
+                if sock in exclude:
+                    continue
+                try:
+                    await sock.send_json(frame)
+                except Exception:  # noqa: BLE001
+                    other.sockets.discard(sock)
 
     async def repaint_sockets(box: "ChatBox", socks: set,
                               broadcast_tree: bool = False,
@@ -3338,11 +3409,37 @@ def main() -> int:
             if new_name == old_name:
                 return
             _box.name = new_name
+            _box.ui._chat_box_name = new_name
             if CHATS.get(old_name) is _box:
                 del CHATS[old_name]
             CHATS[new_name] = _box
         box.follow_rename = _follow_rename
         ui._chat_follow_rename = _follow_rename
+        ui._chat_box_name = name
+        # The ask_form surface: queue on the box, surface to ALL live
+        # sockets (any tab may answer; the frame names this chat).
+        def _queue_form(frame: dict, _box=box) -> None:
+            _box.pending_form = dict(frame)
+        def _surface_form(frame: dict, _ui=ui) -> None:
+            # Runs on the EXECUTOR thread (the tool blocks there):
+            # schedule onto the ENGINE loop the WebChat already holds
+            # (rebound live at connect), never get_event_loop() here --
+            # that would mint a fresh dead loop and silently drop the
+            # broadcast (the empty-socket failure).
+            loop_ref = getattr(_ui, "_loop", None)
+            if loop_ref is None or loop_ref.is_closed():
+                return
+            try:
+                loop_ref.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        broadcast_all(frame)))
+            except RuntimeError:
+                pass
+        def _unqueue_form(_box=box) -> None:
+            _box.pending_form = None
+        ui._chat_queue_form = _queue_form
+        ui._chat_surface_form = _surface_form
+        ui._chat_unqueue_form = _unqueue_form
         loaded_tree = None
         try:
             ok, _note = sessions.load(name)
@@ -3647,6 +3744,10 @@ def main() -> int:
             for frame in box.history:
                 await websocket.send_json(frame)
             await websocket.send_json({"kind": "restore_end"})
+        # A question this chat is still waiting on surfaces on join:
+        # the model may have asked while no tab was viewing this chat.
+        if box.pending_form:
+            await websocket.send_json(box.pending_form)
         loop = asyncio.get_event_loop()
         box.sockets.add(websocket)
 
@@ -4183,12 +4284,37 @@ def main() -> int:
                     name = str(op.get("name", "")).strip()
                     if verb == "list":
                         rows = []
-                        live = {name for name in CHATS}
+                        by_name: dict[str, dict[str, Any]] = {}
+                        # Files first (they carry turns/preview meta)
                         for row in box.sessions.listing():
                             if row.get("name") == SessionManager.AUTOSAVE:
                                 continue
-                            row["live"] = row["name"] in live
+                            by_name[row["name"]] = row
+                        # Live chats without files yet (a brand-new chat
+                        # mid-turn autosaves only at turn end) are real
+                        # conversations: list them too, newest-turn-
+                        # first ordering kept by sorting on mtime.
+                        for name, live_box in CHATS.items():
+                            if name == SessionManager.AUTOSAVE:
+                                continue
+                            if name not in by_name:
+                                by_name[name] = {
+                                    "name": name,
+                                    "mtime": time.time(),
+                                    "messages": len(
+                                        live_box.ui.session.messages),
+                                    "turns": live_box.ui.session.turns,
+                                    "preview": "(open)",
+                                }
+                        for row in by_name.values():
+                            pending = CHATS.get(row["name"])
+                            row["live"] = pending is not None
+                            row["asking"] = bool(
+                                pending is not None
+                                and pending.pending_form is not None)
                             rows.append(row)
+                        rows.sort(key=lambda r: r.get("mtime", 0),
+                                  reverse=True)
                         await websocket.send_json({
                             "kind": "session_list",
                             "sessions": rows})
@@ -4593,12 +4719,28 @@ def main() -> int:
                 # verb. A late/second answer when nobody is waiting is
                 # ignored (the wait may have timed out already).
                 if isinstance(message.get("form_answer"), dict):
-                    wait = getattr(box.ui, "_form_wait", None)
+                    # The answer may come from a tab NOT viewing the
+                    # owning chat (the ask_form surface broadcasts to
+                    # every socket). Route by the form's chat name, and
+                    # close the dialog on every OTHER socket too.
+                    want_chat = str(
+                        message["form_answer"].get("chat") or "") \
+                        or box.name
+                    target = CHATS.get(want_chat)
+                    wait = getattr(target.ui, "_form_wait", None) \
+                        if target is not None \
+                        else getattr(box.ui, "_form_wait", None)
                     if wait is not None:
                         done, holder = wait
-                        holder["answer"] = message["form_answer"].get(
-                            "values") or None
+                        holder["answer"] = \
+                            message["form_answer"].get("values") or None
                         done.set()
+                        if target is not None:
+                            target.pending_form = None
+                        closer = {"kind": "ask_form_close",
+                                  "chat": want_chat,
+                                  "answered": True}
+                        await broadcast_all(closer)
                     else:
                         await websocket.send_json({
                             "kind": "notice",
