@@ -2723,22 +2723,14 @@ class WebChat(ChatUI):
             self._fence_raw = ""
         self._frame({"kind": "turn_end"})
 
-    # -- history repaint: a loaded session replays through the normal ------
-    # -- handlers, so a restored transcript is visually identical ----------
-    def send_history(self, messages: list[dict[str, Any]]) -> None:
-        """Repaint stored messages as frames through the page's handlers."""
-        for frame in self.render_history(messages):
-            self._frame(frame)
-        # Images the conversation generated: each rendered as its own
-        # alternating turn (an assistant row, then the image) -- the same
-        # back-and-forth flow as text, instead of a pile dumped after
-        # the transcript. Newest first, capped.
-        for frame in self.render_images():
-            self._frame(frame)
-
-    def render_images(self) -> list[dict[str, Any]]:
+    def render_images(self, owned: "list[str] | None" = None
+                      ) -> list[dict[str, Any]]:
         """The image-turn frames for a repaint -- same shape the live
-        path sends, sidecar request included."""
+        path sends, sidecar request included. ``owned`` is this
+        CHAT'S image list (file names); with per-chat repaints the
+        shared images/ folder must not leak every era's generations
+        into every chat -- a chat shows its own images, and unowned
+        historical images belong to the legacy chat alone."""
         frames: list[dict[str, Any]] = []
         try:
             images = sorted(
@@ -2746,6 +2738,9 @@ class WebChat(ChatUI):
                 key=lambda p: p.stat().st_mtime, reverse=True)
         except OSError:
             images = []
+        if owned is not None:
+            wanted = set(owned)
+            images = [p for p in images if p.name in wanted]
         for path in images[:20]:
             frames.append({"kind": "assistant"})
             frame: dict[str, Any] = {"kind": "image",
@@ -3230,6 +3225,9 @@ def main() -> int:
             self.sockets: set = set()
             #: the in-flight task (text/image) this chat owns
             self.task: asyncio.Task | None = None
+            #: this chat's image files (names under images/), in
+            #: generation order. A chat repaints only its own images.
+            self.images: list[str] = []
 
         def log(self, frame: dict[str, Any]) -> None:
             """Record into this chat's frame log (bounded). ask_form is
@@ -3263,7 +3261,7 @@ def main() -> int:
         frames: list[dict[str, Any]] = [{"kind": "clear"},
                                          {"kind": "restore_begin"}]
         frames.extend(box.ui.render_history(box.ui.session.messages))
-        frames.extend(box.ui.render_images())
+        frames.extend(box.ui.render_images(box.images))
         frames.append({"kind": "restore_end"})
         if broadcast_tree:
             frames.append({"kind": "tree", **box.tree.describe(),
@@ -3279,6 +3277,42 @@ def main() -> int:
                     if sock in box.sockets:
                         box.sockets.discard(sock)
                     socks.discard(sock)
+
+    def _seed_chat_images(box: "ChatBox") -> None:
+        """A chat's image list from two sources: its own saved history
+        (every generate_image tool result names the file it wrote) and
+        sidecar ownership (post-chats sidecars record the chat that
+        generated them). The legacy chat additionally adopts every
+        image whose sidecar records NO owner -- the pre-chats era,
+        which had one shared conversation anyway."""
+        import re as _re
+
+        pat = _re.compile(r"images/([\w.\-]+\.png)")
+        names: list[str] = []
+        for m in box.ui.session.messages:
+            for match in pat.finditer(str(m.get("content", ""))):
+                name = match.group(1)
+                if name not in names:
+                    names.append(name)
+        img_dir = Path(str(box.ui.session.workspace.root)) / "images"
+        if img_dir.is_dir():
+            for side in sorted(img_dir.glob("*.prompt"),
+                               key=lambda p: p.stat().st_mtime):
+                try:
+                    req = json.loads(side.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                owner = str(req.get("chat") or "")
+                name = side.stem + ".png"
+                if owner == box.name and name not in names:
+                    names.append(name)
+                elif not owner and box.name == "legacy":
+                    name_png = side.with_suffix(".png").name
+                    if not (img_dir / name_png).exists():
+                        continue
+                    if name_png not in names:
+                        names.append(name_png)
+        box.images = names
 
     def build_chat(name: str) -> "ChatBox":
         """Build a chat from its session file (or fresh when the file
@@ -3326,11 +3360,15 @@ def main() -> int:
         # Prime the frame log from the loaded messages: a connect (or a
         # server restart) paints the transcript instead of an empty
         # page with context the engine holds but the page cannot see.
-        if ui.session.messages:
-            for frame in ui.render_history(ui.session.messages):
-                box.log(frame)
-            for frame in ui.render_images():
-                box.log(frame)
+        # Images: this chat's own list, seeded from its saved history
+        # (generate_image tool results name the file), so no other
+        # chat's images leak in. Legacy additionally adopts the
+        # unowned historical images (pre-chats era).
+        for frame in ui.render_history(ui.session.messages):
+            box.log(frame)
+        _seed_chat_images(box)
+        for frame in ui.render_images(box.images):
+            box.log(frame)
         CHATS[name] = box
         return box
 
@@ -4089,14 +4127,20 @@ def main() -> int:
                     # Sidecar for the disk-replay: the prompt and
                     # knobs, durable next to the newest image this
                     # run wrote (the raw text names it, but the
-                    # file is easier to find by mtime).
+                    # file is easier to find by mtime). The OWNING
+                    # CHAT rides along, so a rebuild seeds this
+                    # image into the right chat.
                     try:
                         newest = max(
                             (chat_config.root / "images")
                             .glob("*.png"),
                             key=lambda p: p.stat().st_mtime)
+                        req_chat = dict(req_echo_plain)
+                        req_chat["chat"] = box.name
                         newest.with_suffix(".prompt").write_text(
-                            json.dumps(req_echo_plain, indent=2))
+                            json.dumps(req_chat, indent=2))
+                        if newest.name not in box.images:
+                            box.images.append(newest.name)
                     except (OSError, ValueError):
                         pass
                 elif result is not None:
@@ -4241,6 +4285,10 @@ def main() -> int:
                     elif target.is_file():
                         try:
                             target.unlink()
+                            # keep the owning chat's list honest
+                            name = Path(rel).name
+                            if name in box.images:
+                                box.images.remove(name)
                             await websocket.send_json({
                                 "kind": "notice",
                                 "text": f"deleted {rel}"})
