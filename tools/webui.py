@@ -1800,7 +1800,8 @@ function renderSessionList(entries) {
     const sub = document.createElement("div");
     sub.className = "sess-sub";
     const when = s.mtime ? new Date(s.mtime * 1000).toLocaleString() : "";
-    sub.textContent = (s.turns || 0) + " turns · " +
+    sub.textContent = (s.live ? "● open · " : "") +
+      (s.turns || 0) + " turns · " +
       (s.messages || 0) + " msgs · " + when +
       (s.preview ? " · " + s.preview : "");
     main.appendChild(nameEl); main.appendChild(sub);
@@ -2989,6 +2990,22 @@ class TurnTree:
             self.nodes[self.active]["assistant"] = pending_assistant
 
 
+#: SessionManager sits at module level, so the name-minter it needs
+#: lives beside it. Mints a unique chat-<timestamp> file name for a
+#: chat's first autosave and records it on the UI so the ChatBox's name
+#: (and the listing's) can follow it.
+def _mint_chat_name(ui: "WebChat") -> str:
+    from rt_harness.infotools import _session_dir
+
+    directory = _session_dir()
+    base = time.strftime("chat-%Y%m%d-%H%M%S")
+    name, n = base, 2
+    while (directory / f"{name}.json").exists():
+        name = f"{base}-{n}"
+        n += 1
+    return name
+
+
 class SessionManager:
     """Named chat sessions over the engine's ``~/.k0b0l-sessions`` store.
 
@@ -3019,19 +3036,24 @@ class SessionManager:
         self.active_session: str = SessionManager.AUTOSAVE
 
     def autosave(self) -> str:
-        """Persist the live conversation into the ACTIVE document --
-        named session when one is loaded, the scratch slot otherwise --
-        AND keep the scratch slot a mirror of the same conversation.
-
-        The mirror is the restart-restore contract: startup loads the
-        scratch slot, and the marker it carries pivots the active
-        document back to the named session the operator was in. A
-        mirror that lagged one turn behind would restore a stale
-        conversation with the right name -- the worst of both."""
-        note = self.save(self.active_session)
-        if self.active_session != SessionManager.AUTOSAVE:
-            self.save(SessionManager.AUTOSAVE)
-        return note
+        """Persist the live conversation into the ACTIVE document. With
+        chats, each chat IS its own document (a chat's session manager
+        has `active_session` set to the chat's own name from birth),
+        so a plain save suffices. The old scratch-mirror
+        (`__webui_last__`) is GONE: mirroring every chat's turn into
+        one shared slot was the one-session contract, and with N chats
+        it wrote chat A's turns into the slot chat B would restore.
+        A chat that has never been named is saved under its generated
+        chat-<ts> name on its first completed turn."""
+        if self.active_session == SessionManager.AUTOSAVE:
+            # An un-named chat: give it a file of its own. The name is
+            # minted once and pinned, so the operator's chats keep
+            # stable identities without ever typing one.
+            self.active_session = _mint_chat_name(self.ui)
+            follow = getattr(self.ui, "_chat_follow_rename", None)
+            if callable(follow):
+                follow(self.active_session)
+        return self.save(self.active_session)
 
     def adopt_document(self, name: str) -> None:
         """A named load makes THAT file the active document: its turns
@@ -3120,6 +3142,8 @@ class SessionManager:
         except OSError:
             return rows
         for path in paths:
+            if path.stem == SessionManager.AUTOSAVE:
+                continue  # the dead mirror slot is not a chat
             row: dict[str, Any] = {"name": path.stem,
                                    "mtime": path.stat().st_mtime}
             try:
@@ -3272,6 +3296,19 @@ def main() -> int:
         ui._frame_out = lambda payload: asyncio.ensure_future(
             chat_pub(box, payload))
         sessions.active_session = name
+        # When autosave mints a file name for an un-named chat, the
+        # box (and its registry entry) must follow: the chat's identity
+        # IS its file. Hook the session manager's rename onto the box.
+        def _follow_rename(new_name: str, _box=box) -> None:
+            old_name = _box.name
+            if new_name == old_name:
+                return
+            _box.name = new_name
+            if CHATS.get(old_name) is _box:
+                del CHATS[old_name]
+            CHATS[new_name] = _box
+        box.follow_rename = _follow_rename
+        ui._chat_follow_rename = _follow_rename
         loaded_tree = None
         try:
             ok, _note = sessions.load(name)
@@ -3286,6 +3323,14 @@ def main() -> int:
                 tree.messages_for(tree.active)
         else:
             tree.adopt(ui.session.messages)
+        # Prime the frame log from the loaded messages: a connect (or a
+        # server restart) paints the transcript instead of an empty
+        # page with context the engine holds but the page cannot see.
+        if ui.session.messages:
+            for frame in ui.render_history(ui.session.messages):
+                box.log(frame)
+            for frame in ui.render_images():
+                box.log(frame)
         CHATS[name] = box
         return box
 
@@ -3308,32 +3353,67 @@ def main() -> int:
     from rt_harness.infotools import _session_dir
     sessions_dir = _session_dir()
 
+    # -- one-time legacy migration ---------------------------------------
+    # Before chats, the sessions dir accumulated one-session-era
+    # files: named saves, probe files, the __webui_last__ mirror. With
+    # per-chat files those read as N separate "chats" of stale context.
+    # Migrate ONCE: every pre-chats file folds into a single `legacy`
+    # chat (its messages concatenated in mtime order); the originals
+    # move into legacy-archive/ (kept, never deleted) so nothing is
+    # lost and the migration never re-fires.
+    def migrate_legacy() -> None:
+        import json as _json
+
+        if (sessions_dir / "legacy.json").is_file() \
+                or (sessions_dir / "legacy-archive").is_dir():
+            return
+        olds = [p for p in sessions_dir.glob("*.json")
+                if p.stem not in ("legacy",)]
+        if not olds:
+            return
+        olds.sort(key=lambda p: p.stat().st_mtime)
+        messages: list[dict[str, Any]] = []
+        for path in olds:
+            try:
+                data = _json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            rows = data.get("messages")
+            if isinstance(rows, list):
+                messages.extend(m for m in rows
+                                if isinstance(m, dict))
+        archive = sessions_dir / "legacy-archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        if messages:
+            payload = {"messages": messages, "active_session": "legacy"}
+            (sessions_dir / "legacy.json").write_text(
+                _json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8")
+        for path in olds:
+            try:
+                path.rename(archive / path.name)
+            except OSError:
+                pass
+
+    try:
+        migrate_legacy()
+    except Exception:  # noqa: BLE001 - migration is best-effort
+        pass
+
     #: The chat a new connect lands in: the most recently modified
-    # session file (the operator's last conversation), the scratch
-    # slot when one exists, else a brand-new chat. The old autosave
-    # marker (active_session) pivots the same way it did before.
+    # CHAT file -- never the dead mirror slot. The marker the old
+    # mirror carried is honored during migration only; afterwards the
+    # newest chat IS the operator's last conversation.
     def initial_chat() -> "ChatBox":
         try:
-            paths = sorted(sessions_dir.glob("*.json"),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
+            paths = [p for p in sessions_dir.glob("*.json")
+                     if p.stem != SessionManager.AUTOSAVE]
+            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         except OSError:
             paths = []
         if not paths:
             return build_chat(fresh_chat_name())
-        name = paths[0].stem
-        if name == SessionManager.AUTOSAVE:
-            # the scratch slot may carry the named-doc marker: pivot
-            try:
-                import json as _json
-                data = _json.loads(
-                    (sessions_dir / f"{SessionManager.AUTOSAVE}.json")
-                    .read_text(encoding="utf-8"))
-                marker = str(data.get("active_session") or "")
-                if marker and (sessions_dir / f"{marker}.json").is_file():
-                    name = marker
-            except (OSError, ValueError):
-                pass
-        return get_or_build_chat(name)
+        return get_or_build_chat(paths[0].stem)
 
     #: One generation at a time, server-wide: the card, the swap chain
     #: and the router are shared hardware, not per-chat state. Two
@@ -4058,21 +4138,39 @@ def main() -> int:
                     verb = str(op.get("verb", ""))
                     name = str(op.get("name", "")).strip()
                     if verb == "list":
+                        rows = []
+                        live = {name for name in CHATS}
+                        for row in box.sessions.listing():
+                            if row.get("name") == SessionManager.AUTOSAVE:
+                                continue
+                            row["live"] = row["name"] in live
+                            rows.append(row)
                         await websocket.send_json({
                             "kind": "session_list",
-                            "sessions": box.sessions.listing()})
+                            "sessions": rows})
                         continue
                     if verb == "new":
                         # A brand-new chat: build it, rebind THIS socket,
                         # repaint the socket alone. Other tabs keep
-                        # their own conversations.
+                        # their own conversations. Saved immediately --
+                        # a chat exists the moment it is opened, so it
+                        # survives restarts and shows in the listing
+                        # even before its first turn.
                         newbox = build_chat(fresh_chat_name())
                         box.sockets.discard(websocket)
                         box = newbox
                         box.sockets.add(websocket)
+                        try:
+                            box.sessions.autosave()
+                        except Exception:  # noqa: BLE001
+                            pass
                         await repaint_sockets(box, {websocket})
-                        await pub(box, {"kind": "notice",
-                                        "text": f"new chat: {box.name}"})
+                        await websocket.send_json({"kind": "meta",
+                                                   "model": box.ui.session.config.model,
+                                                   "protocol": box.ui.session.protocol,
+                                                   "num_ctx": box.ui.session.config.num_ctx,
+                                                   "theme": saved_theme or "k0b0l-dark",
+                                                   "chat": box.name})
                         continue
                     if verb == "load":
                         # Chat semantics: loading a session REBINDS this
