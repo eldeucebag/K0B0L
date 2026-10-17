@@ -282,9 +282,12 @@ def gen_via_api(model: str, prompt: str, out_path: Path, size: str,
         IMAGE_API.rstrip("/") + "/v1/images/generations",
         data=payload, headers={"Content-Type": "application/json"})
     try:
-        # 25 minutes: measured 910 s for qwen at 1024x1024 on the 1070;
-        # the old 600 s socket timeout dropped a generation that finished.
-        with urllib.request.urlopen(request, timeout=1500) as response:
+        # 45 minutes: a 60-step qwen 1024x1024 run measures ~1590 s
+        # (1310 s sampling + 280 s VAE decode) on the 1070; a 30-minute
+        # ceiling killed a run that had finished sampling and was 5
+        # minutes into its decode. The decode writes no step lines --
+        # the ceiling must cover it with real headroom.
+        with urllib.request.urlopen(request, timeout=2700) as response:
             data = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]
@@ -527,7 +530,10 @@ def gen_advanced(model: str, prompt: str, out: str,
             headers={"Content-Type": "application/json"})
         print(f"[{model}] via sdapi /{route}...", file=sys.stderr)
         try:
-            with urllib.request.urlopen(request, timeout=1800) as response:
+            # 45 min: a 60-step qwen run measures ~1590 s sampling +
+            # decode on this card; a 30-minute ceiling sat exactly ON the
+            # real runtime and killed a finished-sampling run mid-VAE.
+            with urllib.request.urlopen(request, timeout=2700) as response:
                 data = json.loads(response.read())
             images = [b for b in (data.get("images") or [])
                       if isinstance(b, str)]
@@ -546,7 +552,7 @@ def gen_advanced(model: str, prompt: str, out: str,
                     IMAGE_API.rstrip("/") + "/v1/images/generations",
                     data=json.dumps(v1).encode(),
                     headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(request, timeout=1800) as response:
+                with urllib.request.urlopen(request, timeout=2700) as response:
                     data = json.loads(response.read())
                 rows = data.get("data") or []
                 images = [str(r.get("b64_json") or "")
