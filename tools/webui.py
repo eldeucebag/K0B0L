@@ -46,54 +46,64 @@ PORT = 8321
 
 WEB_THEMES: dict[str, dict[str, str]] = {
     # Windows 3.1 "Hot Dog Stand", from the scheme's own value table:
-    # #FFFF00 desktop/window faces, #FF0000 window background, white
-    # window text, BLACK active title bars, silver #C0C0C0 buttons with
-    # the #808080 shadow. Code blocks are the black title bar; errors
-    # are white-on-red the way the scheme highlighted selections.
+    # #FFFF00 desktop, black menu/desktop text (the scheme's own Menu
+    # Text 0.0.0), #FF0000 windows, black title bars, #C0C0C0 button
+    # face, #808080 button shadow, white #FFFFFF menu bar. Readability:
+    # body is BLACK on yellow; folds/results are the silver button face
+    # with the scheme's dark red; code/thinking sit on the white menu
+    # bar. Every pair is contrast-checked (see check_webui_themes.py).
     "hotdog-3x": {
-        "--bg": "#FFFF00", "--surface": "#C0C0C0", "--band": "#FF0000",
-        "--ink": "#FFFFFF", "--muted": "#C0C0C0", "--faint": "#808080",
+        "--bg": "#FFFF00", "--surface": "#C0C0C0", "--band": "#C0C0C0",
+        "--ink": "#000000", "--muted": "#A00000", "--faint": "#808080",
         "--accent": "#FF0000", "--accent-ink": "#FFFF00",
-        "--code-bg": "#000000", "--think-bg": "#A00000",
-        "--warn": "#FF0000", "--err": "#FFFFFF",
+        "--code-bg": "#FFFFFF", "--think-bg": "#FFFFFF",
+        "--warn": "#FF0000", "--err": "#A00000",
         "--border": "#000000",
-        "--syn-k": "#FF0000", "--syn-s": "#A0A0A0", "--syn-n": "#FF0000",
-        "--syn-c": "#808080", "--syn-f": "#C0C0C0",
+        "--syn-k": "#FF0000", "--syn-s": "#A00000", "--syn-n": "#FF0000",
+        "--syn-c": "#808080", "--syn-f": "#000000",
     },
     # BeOS R5, from Haiku's preserved default UI colors: #D8D8D8 panel
-    # grey, the #FFCB00 window tab, #336698 desktop blue, keyboard-nav
-    # #0000E5, document background white, failure #FF4136.
+    # grey, #336698 desktop, #0000E5 keyboard-navigation blue (the
+    # interactive highlight BeOS actually used for links/selection --
+    # the #FFCB00 tab is a BACKGROUND with black text and reads badly
+    # as foreground on light grey), document background white,
+    # failure #C00000 (the TUI's own BeOS error red).
     "beos": {
         "--bg": "#D8D8D8", "--surface": "#DEDEDE", "--band": "#E8E8E8",
-        "--ink": "#101010", "--muted": "#3F3F3F", "--faint": "#ACACAC",
-        "--accent": "#FFCB00", "--accent-ink": "#000000",
+        "--ink": "#101010", "--muted": "#3F3F3F", "--faint": "#707070",
+        "--accent": "#0000E5", "--accent-ink": "#FFFFFF",
         "--code-bg": "#FFFFFF", "--think-bg": "#E8E8E8",
-        "--warn": "#808040", "--err": "#FF4136", "--border": "#ACACAC",
+        "--warn": "#606030", "--err": "#C00000", "--border": "#ACACAC",
         "--syn-k": "#0000E5", "--syn-s": "#27528C", "--syn-n": "#6698CB",
         "--syn-c": "#9C9C9C", "--syn-f": "#336698",
     },
-    # C64 boot screen, strictly the 16 VIC-II colors (pepto/VICE):
-    # #352879 blue screen, #7869C4 light-blue border, #6F3D86 purple,
-    # #B8C76F yellow, #9AD284 light green, #883932 red, #70A4B2 cyan.
-    # The machine had no shade steps inside a hue, so the "darker" bands
-    # use its purple instead of invented blends.
+    # C64 boot screen, colorec (pepto's own remeasured palette -- the
+    # 2001 values were violet-heavy): blue #2E2C9B background, light
+    # blue #706DEB border (colors 6/14, the actual boot pairing), with
+    # white body text for legibility (light blue on blue measures
+    # ~2.6:1; white is VIC-II color 1 and what C64 software used when
+    # it needed to be READ). Folds and code are black (color 0) with
+    # grey #B2B2B2 (color F) secondary text. All 16 colorec colors.
     "commodore-64": {
-        "--bg": "#352879", "--surface": "#352879", "--band": "#6F3D86",
-        "--ink": "#7869C4", "--muted": "#6C6C6C", "--faint": "#444444",
-        "--accent": "#B8C76F", "--accent-ink": "#352879",
-        "--code-bg": "#6F3D86", "--think-bg": "#352879",
-        "--warn": "#B8C76F", "--err": "#883932", "--border": "#7869C4",
-        "--syn-k": "#EDF171", "--syn-s": "#9AD284", "--syn-n": "#B8C76F",
-        "--syn-c": "#7869C4", "--syn-f": "#70A4B2",
+        "--bg": "#2E2C9B", "--surface": "#2E2C9B", "--band": "#000000",
+        "--ink": "#FFFFFF", "--muted": "#B2B2B2", "--faint": "#7B7B7B",
+        "--accent": "#EDF171", "--accent-ink": "#2E2C9B",
+        "--code-bg": "#000000", "--think-bg": "#000000",
+        "--warn": "#EDF171", "--err": "#FF6C76", "--border": "#706DEB",
+        "--syn-k": "#EDF171", "--syn-s": "#A9FF9F", "--syn-n": "#FFFFFF",
+        "--syn-c": "#7B7B7B", "--syn-f": "#75CEC8",
     },
     # MS-DOS Editor (EDIT.COM/QBasic IDE), EGA: #0000AA blue screen,
     # #AAAAAA silver text, #00AAAA cyan title/menu bar, #FFFF55 yellow,
     # #55FF55 bright green, #FF5555 bright red, #55FFFF bright cyan.
+    # Readability: body silver on blue (the editor's own pairing,
+    # 7.4:1); muted is bright cyan (3.9:1) the way QBasic dimmed
+    # selections; code blocks are the black of a DOS text window.
     "edit-com": {
         "--bg": "#0000AA", "--surface": "#0000AA", "--band": "#0000AA",
         "--ink": "#AAAAAA", "--muted": "#55FFFF", "--faint": "#5555FF",
         "--accent": "#00AAAA", "--accent-ink": "#000000",
-        "--code-bg": "#000055", "--think-bg": "#000077",
+        "--code-bg": "#000000", "--think-bg": "#000055",
         "--warn": "#FFFF55", "--err": "#FF5555", "--border": "#00AAAA",
         "--syn-k": "#FFFF55", "--syn-s": "#55FF55", "--syn-n": "#FFFFFF",
         "--syn-c": "#5555FF", "--syn-f": "#55FFFF",
@@ -827,10 +837,10 @@ dialog button.primary:hover { color: var(--accent-ink); }
 <script>
 const THEMES = {
   "k0b0l-dark": {"--bg":"#0a0e14","--surface":"#11151d","--band":"#161b26","--ink":"#e6e9ef","--muted":"#8b93a3","--faint":"#5c6474","--accent":"#62e2c6","--accent-ink":"#062a22","--code-bg":"#131722","--think-bg":"#12141c","--warn":"#e2b962","--err":"#e2627a","--border":"#1d2330","--syn-k":"#c792ea","--syn-s":"#c3e88d","--syn-n":"#f78c6c","--syn-c":"#5c6474","--syn-f":"#82aaff"},
-  "hotdog-3x": {"--bg":"#FFFF00","--surface":"#C0C0C0","--band":"#FF0000","--ink":"#FFFFFF","--muted":"#C0C0C0","--faint":"#808080","--accent":"#FF0000","--accent-ink":"#FFFF00","--code-bg":"#000000","--think-bg":"#A00000","--warn":"#FF0000","--err":"#FFFFFF","--border":"#000000","--syn-k":"#FF0000","--syn-s":"#A0A0A0","--syn-n":"#FF0000","--syn-c":"#808080","--syn-f":"#C0C0C0"},
-  "beos": {"--bg":"#D8D8D8","--surface":"#DEDEDE","--band":"#E8E8E8","--ink":"#101010","--muted":"#3F3F3F","--faint":"#ACACAC","--accent":"#FFCB00","--accent-ink":"#000000","--code-bg":"#FFFFFF","--think-bg":"#E8E8E8","--warn":"#808040","--err":"#FF4136","--border":"#ACACAC","--syn-k":"#0000E5","--syn-s":"#27528C","--syn-n":"#6698CB","--syn-c":"#9C9C9C","--syn-f":"#336698"},
-  "commodore-64": {"--bg":"#352879","--surface":"#352879","--band":"#6F3D86","--ink":"#7869C4","--muted":"#6C6C6C","--faint":"#444444","--accent":"#B8C76F","--accent-ink":"#352879","--code-bg":"#6F3D86","--think-bg":"#352879","--warn":"#B8C76F","--err":"#883932","--border":"#7869C4","--syn-k":"#EDF171","--syn-s":"#9AD284","--syn-n":"#B8C76F","--syn-c":"#7869C4","--syn-f":"#70A4B2"},
-  "edit-com": {"--bg":"#0000AA","--surface":"#0000AA","--band":"#0000AA","--ink":"#AAAAAA","--muted":"#55FFFF","--faint":"#5555FF","--accent":"#00AAAA","--accent-ink":"#000000","--code-bg":"#000055","--think-bg":"#000077","--warn":"#FFFF55","--err":"#FF5555","--border":"#00AAAA","--syn-k":"#FFFF55","--syn-s":"#55FF55","--syn-n":"#FFFFFF","--syn-c":"#5555FF","--syn-f":"#55FFFF"},
+  "hotdog-3x": {"--bg":"#FFFF00","--surface":"#C0C0C0","--band":"#C0C0C0","--ink":"#000000","--muted":"#A00000","--faint":"#808080","--accent":"#FF0000","--accent-ink":"#FFFF00","--code-bg":"#FFFFFF","--think-bg":"#FFFFFF","--warn":"#FF0000","--err":"#A00000","--border":"#000000","--syn-k":"#FF0000","--syn-s":"#A00000","--syn-n":"#FF0000","--syn-c":"#808080","--syn-f":"#000000"},
+  "beos": {"--bg":"#D8D8D8","--surface":"#DEDEDE","--band":"#E8E8E8","--ink":"#101010","--muted":"#3F3F3F","--faint":"#707070","--accent":"#0000E5","--accent-ink":"#FFFFFF","--code-bg":"#FFFFFF","--think-bg":"#E8E8E8","--warn":"#606030","--err":"#C00000","--border":"#ACACAC","--syn-k":"#0000E5","--syn-s":"#27528C","--syn-n":"#6698CB","--syn-c":"#9C9C9C","--syn-f":"#336698"},
+  "commodore-64": {"--bg":"#2E2C9B","--surface":"#2E2C9B","--band":"#000000","--ink":"#FFFFFF","--muted":"#B2B2B2","--faint":"#7B7B7B","--accent":"#EDF171","--accent-ink":"#2E2C9B","--code-bg":"#000000","--think-bg":"#000000","--warn":"#EDF171","--err":"#FF6C76","--border":"#706DEB","--syn-k":"#EDF171","--syn-s":"#A9FF9F","--syn-n":"#FFFFFF","--syn-c":"#7B7B7B","--syn-f":"#75CEC8"},
+  "edit-com": {"--bg":"#0000AA","--surface":"#0000AA","--band":"#0000AA","--ink":"#AAAAAA","--muted":"#55FFFF","--faint":"#5555FF","--accent":"#00AAAA","--accent-ink":"#000000","--code-bg":"#000000","--think-bg":"#000055","--warn":"#FFFF55","--err":"#FF5555","--border":"#00AAAA","--syn-k":"#FFFF55","--syn-s":"#55FF55","--syn-n":"#FFFFFF","--syn-c":"#5555FF","--syn-f":"#55FFFF"},
   "amber": {"--bg":"#000000","--surface":"#140D00","--band":"#2B1D00","--ink":"#FFB000","--muted":"#FFC46B","--faint":"#8A5F00","--accent":"#FFD9A0","--accent-ink":"#000000","--code-bg":"#140D00","--think-bg":"#2B1D00","--warn":"#E8A200","--err":"#FF7A00","--border":"#8A5F00","--syn-k":"#FFD9A0","--syn-s":"#FFB000","--syn-n":"#FFC46B","--syn-c":"#8A5F00","--syn-f":"#FFD9A0"},
   "matrix": {"--bg":"#000000","--surface":"#001A0A","--band":"#003B00","--ink":"#00FF41","--muted":"#7CFF9B","--faint":"#008F11","--accent":"#7CFF9B","--accent-ink":"#000000","--code-bg":"#001A0A","--think-bg":"#003B00","--warn":"#B6FF00","--err":"#FF3B3B","--border":"#008F11","--syn-k":"#7CFF9B","--syn-s":"#00FF41","--syn-n":"#7CFF9B","--syn-c":"#008F11","--syn-f":"#00FF41"},
 };
