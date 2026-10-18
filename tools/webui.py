@@ -271,6 +271,16 @@ pre.code {
 }
 .k { color: var(--syn-k); } .s { color: var(--syn-s); } .n { color: var(--syn-n); }
 .c { color: var(--syn-c); font-style: italic; } .f { color: var(--syn-f); }
+/* embedded code blocks: their own place in the transcript, the same
+   visual treatment the thinking fold gets -- a band, not body text */
+details.code { background: var(--think-bg); }
+details.code summary { color: var(--accent); }
+details.code .code-copy { background: none; border: 0;
+  color: var(--faint); cursor: pointer; font-size: 13px;
+  line-height: 1; padding: 0 2px; opacity: 0;
+  transition: opacity 0.12s ease; }
+details.code:hover .code-copy { opacity: 1; }
+details.code .code-copy:hover { color: var(--accent); }
 .tool { display: grid; gap: 2px; }
 .tool .call {
   font-family: var(--mono); font-size: 13px; color: var(--accent);
@@ -1246,25 +1256,62 @@ function who(name, cls) {
   // variable moves on with later frames, so closing over it directly
   // would copy from whatever turn is rendering when the click lands.
   const myTurn = turn;
-  const cp = document.createElement("button");
-  cp.className = "who-copy";
-  cp.textContent = "⧉";
-  cp.title = "copy this message";
-  cp.addEventListener("click", () => {
+  const turnText = () => {
     // The turn's text: every content block in it, joined by newlines.
-    // The who row (label + this button + the typing dots it anchors)
-    // is chrome, not content -- skip it whole.
+    // The who row (label + buttons + the typing dots it anchors) and
+    // the action bars are chrome, not content -- skip them whole.
     const parts = [];
     for (const child of myTurn.children) {
       if (child === row) continue;
       const cls2 = String(child.className || "");
-      if (cls2.includes("artifact-actions")) continue;
+      if (cls2.includes("who") || cls2.includes("artifact-actions")) continue;
       if (cls2.includes("think") || cls2.includes("genbar")) continue;
       parts.push(child.textContent || "");
     }
-    copyText(parts.join(String.fromCharCode(10)).trim());
-  });
+    return parts.join(String.fromCharCode(10)).trim();
+  };
+  const cp = document.createElement("button");
+  cp.className = "who-copy";
+  cp.textContent = "⧉";
+  cp.title = "copy this message";
+  cp.addEventListener("click", () => copyText(turnText()));
   row.appendChild(cp);
+  // Retry: re-send what produced this turn. A user turn re-sends its
+  // own text; an assistant turn re-sends the prompt that led to it.
+  if (name === "you" || name === "model" ||
+      name === "model (thinking)") {
+    const rt = document.createElement("button");
+    rt.className = "who-copy";
+    rt.textContent = "↻";
+    rt.title = "retry: send again";
+    rt.addEventListener("click", () => {
+      let payload = null;
+      if (name === "you") {
+        payload = turnText();
+      } else {
+        // the user turn BEFORE this assistant turn, transcript order
+        const turns = Array.from(transcript.children);
+        const at = turns.indexOf(myTurn);
+        for (let i = at - 1; i >= 0; i--) {
+          const prevYou = turns[i].querySelector(".who.you");
+          if (prevYou) {
+            const parts = [];
+            for (const child of turns[i].children) {
+              const cls2 = String(child.className || "");
+              if (cls2.includes("who") || cls2.includes("artifact-actions")) continue;
+              if (cls2.includes("think") || cls2.includes("genbar")) continue;
+              parts.push(child.textContent || "");
+            }
+            payload = parts.join(String.fromCharCode(10)).trim();
+            break;
+          }
+        }
+      }
+      if (payload) ws.send(JSON.stringify({ text: payload }));
+      else toast("nothing to retry");
+    });
+    row.appendChild(rt);
+  }
   turn.appendChild(row);
   return row;  // the assistant handler anchors the dots to this element
 }
@@ -1427,8 +1474,21 @@ function wireSocket() {
       ensureTurn();
       const cd = document.createElement("details");
       cd.className = "code";
+      cd.open = true;
       const sum = document.createElement("summary");
-      sum.textContent = m.language || "code";
+      const sumLang = document.createElement("span");
+      sumLang.textContent = m.language || "code";
+      sum.appendChild(sumLang);
+      const codeCopy = document.createElement("button");
+      codeCopy.className = "code-copy";
+      codeCopy.textContent = "⧉ copy";
+      codeCopy.title = "copy this code block";
+      codeCopy.addEventListener("click", (ev) => {
+        ev.preventDefault();   // a summary click would toggle the fold
+        ev.stopPropagation();
+        copyText(m.text || "");
+      });
+      sum.appendChild(codeCopy);
       const bd = document.createElement("div"); bd.className = "body";
       const pre = document.createElement("pre"); pre.className = "code";
       pre.textContent = m.text;
@@ -2810,7 +2870,10 @@ class WebChat(ChatUI):
         repaint_chain). Pure: no sends."""
         import re as _re
 
-        fence_re = _re.compile(r"```tool\n(\{.*?\})\n```", _re.DOTALL)
+        tool_fence_re = _re.compile(r"```tool\n(\{.*?\})\n```",
+                                    _re.DOTALL)
+        code_fence_re = _re.compile(
+            r"```([A-Za-z0-9_+#.-]*)\n(.*?)```", _re.DOTALL)
         frames: list[dict[str, Any]] = []
         for message in messages:
             role = message.get("role")
@@ -2833,9 +2896,22 @@ class WebChat(ChatUI):
                                    "text": summarize_call(
                                        str(function.get("name", "")),
                                        function.get("arguments") or {})})
-                shown = fence_re.sub("", body).strip()
-                if shown:
-                    frames.append({"kind": "delta", "text": shown})
+                shown = tool_fence_re.sub("", body).strip()
+                # Fenced CODE blocks replay as code panels (the live
+                # path renders them that way); only the tool plumbing
+                # is dropped. The prose splits around them.
+                pos = 0
+                for m in code_fence_re.finditer(shown):
+                    prose = shown[pos:m.start()].strip()
+                    if prose:
+                        frames.append({"kind": "delta", "text": prose})
+                    frames.append({"kind": "code",
+                                   "language": m.group(1) or "",
+                                   "text": m.group(2).rstrip("\n")})
+                    pos = m.end()
+                tail = shown[pos:].strip()
+                if tail:
+                    frames.append({"kind": "delta", "text": tail})
                 frames.append({"kind": "turn_end"})
             elif role == "tool":
                 body = str(message.get("content", ""))
@@ -3638,7 +3714,7 @@ def main() -> int:
                     state = json.loads(r.read())
             except Exception:  # noqa: BLE001 - no supervisor reachable
                 state = {}
-            await pub({
+            await pub(box, {
                 "kind": "notice",
                 "text": "cancel: bringing the GPU back to the llm "
                         "service (the image generation is stopped)"})
@@ -3648,11 +3724,11 @@ def main() -> int:
                     headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(request, timeout=140) as r:
                     json.loads(r.read())
-                await pub({
+                await pub(box, {
                     "kind": "notice",
                     "text": "the llm service is back"})
             except Exception as exc:  # noqa: BLE001
-                await pub({
+                await pub(box, {
                     "kind": "error",
                     "text": f"cancel: could not restore the llm "
                             f"service: {exc}"})
@@ -3668,10 +3744,10 @@ def main() -> int:
             GEN["last"] = run
             GEN["active"] = None
             try:
-                await pub({"kind": "notice",
+                await pub(box, {"kind": "notice",
                                 "text": "generation cancelled"})
-                await pub({"kind": "turn_end"})
-                await pub({"kind": "busy", "on": False})
+                await pub(box, {"kind": "turn_end"})
+                await pub(box, {"kind": "busy", "on": False})
             except Exception:  # noqa: BLE001
                 pass
         else:
@@ -3681,11 +3757,11 @@ def main() -> int:
             cancel = getattr(box.ui.session.client, "cancel_turn", None)
             if callable(cancel):
                 cancel()
-                await pub({
+                await pub(box, {
                     "kind": "notice",
                     "text": "generation cancelled"})
             else:
-                await pub({
+                await pub(box, {
                     "kind": "notice",
                     "text": "this client cannot cancel mid-turn"})
 
@@ -3699,10 +3775,10 @@ def main() -> int:
         if box.task is not None:
             box.task = None
         if GEN["active"] is None and not getattr(
-                ui, "_inference_in_progress", False):
+                box.ui, "_inference_in_progress", False):
             try:
-                await pub({"kind": "turn_end"})
-                await pub({"kind": "busy", "on": False})
+                await pub(box, {"kind": "turn_end"})
+                await pub(box, {"kind": "busy", "on": False})
             except Exception:  # noqa: BLE001
                 pass
 
