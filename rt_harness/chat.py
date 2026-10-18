@@ -870,6 +870,10 @@ class ChatSession:
         #: is removed once that round comes back, so the transcript never keeps a
         #: user message the operator did not send.
         nudge_index: int | None = None
+        #: Same pattern for the memory-tool loop: one nudge per turn,
+        #: retired after the round that needed it (the nudge-index rule).
+        memory_loop_used = False
+        memory_nudge_index: int | None = None
         self.hooks.inference_start()
         self.hooks.turn_start(self.config.model, self.protocol)
         try:
@@ -936,6 +940,11 @@ class ChatSession:
                     # The round that needed the nudge came back; retire it.
                     del self.messages[nudge_index]
                     nudge_index = None
+                    if memory_nudge_index is not None:
+                        memory_nudge_index -= 1
+                elif memory_nudge_index is not None:
+                    del self.messages[memory_nudge_index]
+                    memory_nudge_index = None
                 self._append_assistant(prose, calls)
                 self.hooks.round_end(stats)
                 if prose:
@@ -986,6 +995,38 @@ class ChatSession:
                     self._explain_empty(final)
                     return final
                 self._run_calls(calls)
+                # A memory-tool loop against an explicit correction: the
+                # operator said what they want changed and the model
+                # answered by filing the correction away (remember /
+                # connect_memories / expand_memory / compress_context)
+                # instead of doing the work. Once per turn, name it and
+                # steer back to prose -- the live transcript that
+                # produced this rule: three corrections in a row, three
+                # memory calls, zero refinements.
+                if (not memory_loop_used
+                        and round_number >= 1
+                        and all(name in (
+                            "remember", "connect_memories",
+                            "expand_memory", "compress_context")
+                            for name, _ in calls)
+                        and calls):
+                    memory_loop_used = True
+                    self.hooks.notice(
+                        "the model filed the correction into memory "
+                        "instead of acting on it; asked it to answer "
+                        "in prose")
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "That tool call was beside the point: the "
+                            "operator's message was an instruction about "
+                            "the task, and filing it into memory does "
+                            "not perform it. Acknowledge the correction "
+                            "and carry out the work in prose now."
+                        ),
+                    })
+                    memory_nudge_index = len(self.messages) - 1
+                    continue
                 if round_number == self.config.max_tool_rounds:
                     self.hooks.notice(
                         f"stopped after {self.config.max_tool_rounds} tool rounds; "
