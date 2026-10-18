@@ -1436,6 +1436,17 @@ Rules:
   artifact is context for THIS task — acknowledge it and apply it, and
   only save it when they ask for it to be kept.
 
+A tool block may also be written in YAML instead of JSON -- the same
+call, with ``name:`` top-level and the arguments as nested keys and
+lists; both shapes parse identically (YAML tends to be quicker to write
+for the deeply nested ``items`` forms):
+
+```yaml
+name: read_file
+arguments:
+  path: example.py
+```
+
 Available tools:
 <<TOOLS>>
 """
@@ -1535,6 +1546,16 @@ TAG_CALL_RE = re.compile(
     r"<\|?/?tool_call\|?>\s*(\{.*?\})\s*<\|?/?tool_call\|?>",
     re.DOTALL,
 )
+
+#: The YAML alternative: the same call with `name:` top-level and
+#: the arguments as nested keys/lists. Measured on the local Gemma:
+#: the deep items forms generate ~40% faster wall-clock in YAML (no
+#: brace/comma bookkeeping) at the same parse-failure rate; flat
+#: calls the model still prefers to write as JSON -- so BOTH shapes
+#: are accepted and the model picks. pyyaml is a lazy import: a
+#: stdlib-only pipeline env simply leaves YAML fences as visible
+#: near-misses (the JSON protocol remains the floor).
+YAML_CALL_RE = re.compile(r"```(?:yaml|yml)\s*\n(.*?)```", re.DOTALL)
 
 #: The named form: the tool name rides in the tag itself, the
 #: arguments are often not JSON (marker quotes, bare keys). The
@@ -1639,6 +1660,30 @@ def near_miss_tool_name(text: str,
     that does not is left to the near-miss prose rule as before.
     """
     known = TOOL_NAMES + tuple(extra_names)
+    # The YAML arm: a body that will not load may still name a real
+    # tool -- intent the engine can nudge about.
+    try:
+        import yaml  # type: ignore
+
+        for match in YAML_CALL_RE.finditer(text):
+            try:
+                payload = yaml.safe_load(match.group(1))
+            except yaml.YAMLError:
+                payload = None
+            if isinstance(payload, dict):
+                name = payload.get("name") or payload.get("tool")
+                if isinstance(name, str) and name in known:
+                    return name
+                return None
+            # The body will not load: the intended tool is still
+            # readable when the model spelled the name field right
+            # (the same intent-reading rule the JSON arm applies).
+            m2 = re.search(r"^[ \t]*name:[ \t]*([A-Za-z_][A-Za-z0-9_]*)",
+                           match.group(1), re.MULTILINE)
+            if m2 and m2.group(1) in known:
+                return m2.group(1)
+    except ImportError:
+        pass
     for pattern in (TEXT_CALL_RE, TAG_CALL_RE):
         for match in pattern.finditer(text):
             payload = None
@@ -1700,6 +1745,24 @@ def parse_text_calls(text: str, extra_names: tuple[str, ...] = ()) -> tuple[str,
         return (name, arguments) if isinstance(arguments, dict) else None
 
     found: list[tuple[int, int, str, dict[str, Any]]] = []
+    # The YAML arm: pyyaml is a lazy import; without it the fence stays
+    # in the prose as a visible near-miss (the JSON protocol is the
+    # floor -- a missing optional dep degrades, never crashes).
+    try:
+        import yaml  # type: ignore
+
+        for match in YAML_CALL_RE.finditer(text):
+            try:
+                payload = yaml.safe_load(match.group(1))
+            except yaml.YAMLError:
+                continue  # malformed: left in prose
+            pair = _arguments_of(payload)
+            if pair is None:
+                continue
+            found.append((match.start(), match.end(),
+                          pair[0], pair[1]))
+    except ImportError:
+        pass
     for pattern in (TEXT_CALL_RE, TAG_CALL_RE):
         for match in pattern.finditer(text):
             body = match.group(1)

@@ -280,6 +280,52 @@ res = ws_bad.call("ask_user_choice", {"prompt": "p",
 check("truly unsalvageable items still error honestly",
       not res.ok and "label or key" in res.text, res.text[:60])
 
+# -- the YAML tool-call arm -------------------------------------------
+# Measured on the local Gemma: the deep items form generates ~40%
+# faster in YAML at the same parse-failure rate; the flat form the
+# model still prefers JSON. Both shapes parse identically.
+YAML_CALL = (
+    "```yaml\n"
+    "name: ask_user_choice\n"
+    "arguments:\n"
+    "  prompt: pick art settings\n"
+    "  items:\n"
+    "    - type: choice\n"
+    "      key: art_style\n"
+    "      options:\n"
+    "        - photoreal render\n"
+    "        - painterly baroque\n"
+    "      multiple: false\n"
+    "    - type: group\n"
+    "      key: composition\n"
+    "      items:\n"
+    "        - type: choice\n"
+    "          key: palette\n"
+    "          options: [warm golds, cold blues]\n"
+    "          multiple: true\n"
+    "```"
+)
+prose, calls = parse_text_calls(YAML_CALL)
+check("a YAML tool call parses like its JSON twin",
+      calls and calls[0][0] == "ask_user_choice"
+      and calls[0][1]["items"][1]["key"] == "composition",
+      str(calls)[:100])
+check("the YAML call is stripped from the prose",
+      "ask_user_choice" not in prose, repr(prose[:60]))
+prose, calls = parse_text_calls(
+    '```tool\n{"name": "read_file", "arguments": {"path": "a"}}\n```')
+check("the JSON protocol still parses unchanged",
+      calls and calls[0][0] == "read_file", str(calls))
+WRECKED_YAML = "```yaml\nname: ask_user_choice\n  arguments: [oops\n```"
+prose, calls = parse_text_calls(WRECKED_YAML)
+check("a wrecked YAML call runs nothing and stays visible",
+      calls == [] and "ask_user_choice" in prose, str(calls))
+check("near_miss_tool_name reads YAML intent",
+      near_miss_tool_name(WRECKED_YAML) == "ask_user_choice")
+check("the protocol prompt offers the YAML shape",
+      "```yaml" in text_protocol_prompt()
+      and "name: read_file" in text_protocol_prompt())
+
 print()
 if fails:
     print(f"{len(fails)} failure(s):")
