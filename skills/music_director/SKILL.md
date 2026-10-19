@@ -1,17 +1,19 @@
 ---
 name: music_director
-description: Expand brief musical ideas into fully specified MiniMax-Music3 generation specs. Gathers the brief interactively with ask_user_choice when anything is missing. Outputs caption + lyrics ready for generate_music.
+description: Expand brief musical ideas into fully specified MiniMax-Music3 structured captions (Global Metadata, Vocal Details, Arrangement) backed by a 1000-template style library with genre routing, then generate via the generate_music tool. Gathers the brief interactively with ask_user_choice when anything is missing.
 trigger:
-  keywords: [music prompt, music director, song, compose, generate music, caption, lyrics]
+  keywords: [music prompt, music director, song, compose, generate music, caption, lyrics, expand music prompt]
 ---
 
 # Music Director
 
-Music generation is not just describing a vibe — it is specifying a latent space coordinate across genre, structure, timbre, and prosody. A vague prompt yields generic drift; a disciplined spec dictates genre, mood, instrumentation, vocal character, and lyrical architecture with technical precision. The deliverable is a synthesis-ready spec (caption + lyrics), not a creative writing exercise.
+Music generation is not just describing a vibe — it is specifying a latent space coordinate across genre, structure, timbre, and prosody. A vague prompt yields generic drift; a disciplined structured caption dictates genre, mood, instrumentation, vocal character, and a section-aware arrangement with technical precision. This skill turns the operator's intent into that caption, backed by a curated library of 1,000 professional reference templates organized into 19 genre families — consulted through progressive disclosure, never scanned wholesale.
+
+The deliverable is a MiniMax Music 3 structured caption (and optionally lyrics) ready for `generate_music`.
 
 ## Gathering the brief
 
-Before expanding anything, make sure you hold all three constraints: the **genre/mood** (what it feels like), the **instrumentation/vocals** (who/what performs), and the **structure/lyrics** (how it unfolds). If any is missing, underspecified, or ambiguous, call `ask_user_choice` ONCE with the structured `items` argument — never interrogate through multiple back-and-forth messages.
+Before expanding anything, make sure you hold the three constraints: the **genre/mood** (what it feels like), the **instrumentation/vocals** (who/what performs), and the **structure/lyrics** (how it unfolds). If any is missing, underspecified, or ambiguous, call `ask_user_choice` ONCE with the structured `items` argument — never interrogate through multiple back-and-forth messages.
 
 Exact call shape:
 
@@ -30,41 +32,61 @@ Exact call shape:
 ```
 
 Rules for the form:
-- Use `type: "choice"` with an `options` list when you can name candidates (genre families, vocal types, structures)
-- Use `type: "text"` when the answer is free-form (instrumentation specifics, lyrical themes) — with a `placeholder` naming what you need
-- Group related axes under `type: "group"` (lyrics has sub-axes)
-- Drop fields whose answers you already hold from the message
-- Never put field dicts into the flat `options` array — that renders as one choice list
+- Use `type: "choice"` with an `options` list when you can name candidates; `type: "text"` for free-form answers (with a `placeholder` naming what you need); group related axes under `type: "group"`.
+- Drop fields whose answers you already hold from the message. Never put field dicts into the flat `options` array.
 - Take the operator's answers as binding constraints. If the message already carries all three constraints, skip the form and proceed.
 
-## The workflow
+## Build the Music Brief
 
-1. **Ingest the constraints.** Take the genre/mood, instrumentation/vocals, and structure/lyrics from the message or the answered form. Treat the genre not as a decorative label, but as the foundational physics of the entire piece — it dictates harmonic language, rhythmic feel, timbral palette, and structural expectations.
+Extract only supported or reasonably inferred values: macro genre and subgenres, mood and emotional arc, approximate tempo/meter/groove, vocal presence/register/timbre/delivery, core instruments and production texture, section structure, spatial character, explicit exclusions. Classify each internally as `explicit`, `tagged`, `inferred`, or `unspecified`.
 
-2. **Expand the sonic identity.** Detail the core instrumentation, timbral descriptors, production techniques, and mix character. Infuse the arrangement, sound design, and processing directly with the requested genre's conventions (e.g., "sidechained sub-bass, FM synth leads, gated reverb on snare" for synthwave; "clean Stratocaster, tube amp breakup, spring reverb" for surf rock).
+Do not invent a precise key, BPM, vocal gender, or production technique when a broader description is sufficient. Preserve an explicit instrumental request — never add vocals. Constraint precedence: (1) explicit user requirements and exclusions, (2) section-local directives from lyric tags, (3) strong implications from the caption, (4) selected reference characteristics, (5) conservative musical defaults. Never silently reverse an explicit vocal gender, instrumental requirement, tempo limit, or prohibited element.
 
-3. **Expand the vocal character (if not instrumental).** Detail voice type, range, phrasing, articulation, backing vocal arrangement, lyrical delivery style (melismatic, staccato, conversational, shouted). Ensure the vocal writing adheres to the genre's prosodic norms.
+## Consult the style library (progressive disclosure)
 
-4. **Define the structural architecture.** Dictate the formal sections with measure counts or time allocations, harmonic rhythm, energy contour, transition techniques (filter sweeps, drum fills, breakdowns), and hook placement. For lyrical songs, specify the rhyme scheme density, syllable-per-measure pacing, and where the title/hook lands.
+The library lives in this skill's directory. Use natural-language reasoning and local text files only — do not scan all templates or build any index of your own.
 
-5. **Write the lyrics (if requested).** Tag sections explicitly: `[verse]`, `[pre-chorus]`, `[chorus]`, `[bridge]`, `[outro]`. Each line on its own. Keep syllabic pacing consistent with the target tempo/feel. Embed the theme as concrete imagery, not abstract emotion.
+1. Read [references/genre-router.md](references/genre-router.md) first. It routes to one primary family index (two for an explicit fusion; the general pop/ballad family when only mood is available).
+2. Read ONLY the selected family index (e.g. [references/index-hip-hop-rap.md](references/index-hip-hop-rap.md)) — compact style cards, one line per template.
+3. Select up to three references with distinct roles: **Foundation** (closest overall identity/groove), **Modifier** (a requested secondary genre, vocal character, or production texture), **Arrangement** (section development, energy contour, transitions).
+4. Read only the complete template files those cards name, under [templates/](templates/) (e.g. [templates/hip-hop-trap_0001.txt](templates/hip-hop-trap_0001.txt)).
 
-6. **Output the synthesis spec.** Deliver EXACTLY two fields ready for `generate_music`:
-   - `caption`: a single paragraph describing the genre, mood, instrumentation, vocal style, production character, and structural arc
-   - `lyrics`: the tagged lyrics block (or empty string for instrumental)
+Use templates safely: Foundation for broad musical identity, Modifier only for its matched dimension, Arrangement only for timeline logic. Do not inherit a template's exact key, BPM, vocalist, or section order; do not copy its sentences or complete structure — synthesize a new caption around the operator's brief.
 
-No conversational filler, no "Here is your spec" framing.
+## Write the structured caption
+
+Render EXACTLY these three top-level headings, in this order:
+
+### Global Metadata
+Genre and subgenres, tempo (exact BPM only when explicit or strongly justified; otherwise a range or qualitative tempo), emotional progression, overall sonic and production profile. Key/scale only when explicit or musically useful.
+
+### Vocal Details
+For vocal music: lead configuration, timbre, register, delivery, harmony/backing vocals, restrained vocal effects. For instrumental music: state that the piece is instrumental and name the instrument or texture carrying the lead melodic role. Never invent lyrical subject matter or reproduce lyrics.
+
+### Arrangement
+A section-by-section timeline (0:00–0:10 Intro, etc. or section names). For every section state what enters, exits, changes, or intensifies — a readable energy arc, not an equipment list. Concrete musical changes over decorative prose. Default 250–450 English words unless the operator requests otherwise.
+
+Do not include a song title, template IDs, reasoning trace, or copied lyric lines. Return JSON only when explicitly requested.
+
+## Write the lyrics (if requested)
+
+Tag sections explicitly: `[verse]`, `[pre-chorus]`, `[chorus]`, `[bridge]`, `[outro]`. Each line on its own. Keep syllabic pacing consistent with the target tempo. Embed the theme as concrete imagery, not abstract emotion. Use bracketed tags only as structural/production directives; never quote or paraphrase the operator's lyric text back.
+
+## Deliver for generation
+
+Hand the operator (or call directly when they asked) `generate_music` with:
+- `caption`: the structured caption from above
+- `lyrics`: the tagged lyrics block, or empty string for instrumental
+- `duration`, `steps`, `seed` when specified
 
 ## Iterative refinement
 
-Music synthesis is a feedback loop. If a generated result drifts from the target genre, do not just add "more detail." Diagnose the failure: was the harmonic language wrong? Was the drum pattern too generic? Was the vocal timbre mismatched? If the operator's correction is ambiguous, offer ONE `ask_user_choice` form (same `items` shape as above) naming the axes of drift you diagnosed — e.g. `{"type": "choice", "key": "drift_axis", "label": "What drifted?", "options": ["genre markers", "vocal timbre", "drum groove", "harmonic language", "mix balance", "structural pacing"], "multiple": true}` — rather than guessing. Adjust the technical specifications and genre constraints in the next iteration to explicitly correct the observed drift. Use `remember` to lock in successful genre descriptors for the current session.
+If a generated result drifts, do not just add "more detail." Diagnose the failure — harmonic language, drum groove, vocal timbre, mix balance, structural pacing — and offer ONE `ask_user_choice` form naming the axes of drift rather than guessing. Re-consult the library with the diagnosis in hand. Use `remember` to lock in successful style descriptors for the session.
 
 ## Ground rules
 
-- Output ONLY the final spec (caption + lyrics). No "Here is your spec" or "I have expanded this."
-- The target genre must permeate the instrumentation, vocals, structure, and lyrics — not just be tacked on at the end.
-- Prioritize concrete sonic nouns and adjectives over abstract emotional concepts (e.g., "detuned supersaw pads with slow attack" instead of "dreamy").
-- If a requested combination is structurally contradictory (e.g., "death metal with fingerpicked acoustic guitar"), embed the tension into the technical specs rather than silently ignoring one constraint.
-- Never generate the music yourself unless the operator asks: your deliverable is the spec. The operator generates from the dialog.
-- Respect the hardware ceiling: `duration` max 240s (~4 min AR budget on this GPU). Keep first passes short (10-20s) for fast iteration.
-- Quality knobs: `steps` 30-60 (higher = better flow matching, slower). Default 30 is a good starting point.
+- The target genre must permeate instrumentation, vocals, structure, and lyrics — not be tacked on.
+- Concrete sonic nouns over abstract emotion ("detuned supersaw pads with slow attack", not "dreamy").
+- Structurally contradictory requests embed the tension in the tech specs; never silently drop a constraint.
+- Respect the hardware: `duration` max 240s (~4 min AR budget on this GPU); first passes 10–20s iterate fastest. A 120s/50-step run took ~32 min wall.
+- Quality knobs: `steps` 30–60 (higher = better flow matching, slower). Long captions are fine — the engine handles them, but they slow prefill.
