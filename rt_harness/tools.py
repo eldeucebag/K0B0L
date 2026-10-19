@@ -439,6 +439,7 @@ class Workspace:
             "expand_memory": self.expand_memory,
             "compress_context": self.compress_context,
             "generate_image": self.generate_image,
+            "generate_music": self.generate_music,
             "load_skill": self.load_skill,
         }
         handler = handlers.get(name)
@@ -1026,6 +1027,150 @@ class Workspace:
                           f"(shown to the operator); prompt was: "
                           f"{(prompt or '')[:80]}")
 
+    def generate_music(
+        self,
+        caption: str,
+        lyrics: str = "",
+        duration: int = 0,
+        steps: int = 0,
+        seed: int = 0,
+    ) -> ToolResult:
+        """Generate a music clip locally and save it into the workspace.
+
+        Runs the harness's music service (tools/audiogen.py) on the
+        MiniMax-Music3 model: a caption describing the music (genre,
+        mood, instrumentation, vocal style), optional ``lyrics``
+        (verses tagged ``[verse]``/``[chorus]``; empty = instrumental
+        take), ``duration`` seconds (max 240 -- the card's ceiling is
+        about four minutes of AR budget), and ``steps`` (quality/speed,
+        10-60, default 30). The clip lands under audio/ in the
+        workspace root and plays in the chat.
+
+        Music generation and the text models share the one GPU: the
+        service frees the card for the run and hands it back after.
+        Measured on this GPU: about two minutes of wall for every ten
+        seconds of audio -- ask for short clips first; a 30 s song is
+        roughly a five-minute turn. The path is returned; describe the
+        music to the operator from the caption and lyrics you chose.
+        """
+        runner = Path(__file__).resolve().parent.parent / "tools" / "audiogen.py"
+        if not runner.is_file():
+            return ToolResult(False, "the music service (tools/audiogen.py) "
+                              "is not installed in this harness checkout")
+        out_dir = self.root / "audio"
+        argv = [sys.executable, str(runner), "gen", caption or "instrumental music"]
+        if lyrics:
+            argv += ["--lyrics", lyrics]
+        if duration:
+            argv += ["--duration", str(duration)]
+        if steps:
+            argv += ["--steps", str(steps)]
+        if seed:
+            argv += ["--seed", str(seed)]
+        argv += ["--out", str(out_dir / f"music-{int(time.time())}.wav")]
+        expected_out = argv[argv.index("--out") + 1]
+
+        # The runner speaks imagegen.py's marker grammar; the same decode
+        # drives the UI's progress hooks. One difference: generation is
+        # minutes-long, so a wrong wall-budget must never strand the GPU.
+        progress_re = re.compile(r"^(?:PHASE|PROGRESS)\s+(.+)$")
+
+        def report(stderr_line: str) -> None:
+            match = progress_re.match(stderr_line.strip())
+            if not match:
+                return
+            body = match.group(1)
+            step_match = re.match(r"^(\d+)\s*/\s*(\d+)$", body)
+            emit = getattr(self._ui, "gen_progress", None)
+            if step_match and callable(emit):
+                emit("generating", int(step_match.group(1)),
+                     int(step_match.group(2)))
+            elif callable(emit):
+                emit(body, 0, 0)
+
+        try:
+            process = subprocess.Popen(  # noqa: S603 - argv list, no shell
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True)
+            stderr_tail: list[str] = []
+            # Measured RTF ~10 on this card; the runner also enforces its
+            # own budget, this is the outer net.
+            budget = 240 + 15 * max(1, min(int(duration or 30), 300))
+            deadline = time.monotonic() + budget
+            import selectors
+
+            sel = selectors.DefaultSelector()
+            sel.register(process.stderr, selectors.EVENT_READ)
+            assert process.stderr is not None
+            try:
+                while True:
+                    events = sel.select(timeout=1.0)
+                    if events:
+                        line = process.stderr.readline()
+                        if line:
+                            report(line)
+                            stderr_tail.append(line.rstrip("\n"))
+                            if len(stderr_tail) > 60:
+                                stderr_tail.pop(0)
+                            continue
+                    if process.poll() is not None:
+                        for line in process.stderr:
+                            report(line)
+                            stderr_tail.append(line.rstrip("\n"))
+                            if len(stderr_tail) > 60:
+                                stderr_tail.pop(0)
+                        break
+                    if time.monotonic() > deadline:
+                        process.kill()
+                        process.wait()
+                        raise subprocess.TimeoutExpired(argv, budget)
+            finally:
+                sel.close()
+                for stream in (process.stdout, process.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            completed = subprocess.CompletedProcess(
+                argv, process.returncode,
+                stdout="", stderr="\n".join(stderr_tail))
+        except subprocess.TimeoutExpired:
+            # The runner owns the swap-back; killed here it never runs,
+            # so ask the supervisor for the card back before reporting.
+            try:
+                subprocess.run(  # noqa: S603 - argv list, no shell
+                    [sys.executable, str(runner), "swapback"],
+                    capture_output=True, text=True, timeout=200)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return ToolResult(False, "music generation timed out; the GPU "
+                              "was handed back to the llm service -- try a "
+                              "shorter duration or fewer steps")
+        except OSError as exc:
+            return ToolResult(False, f"could not run the music service: {exc}")
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            last = detail.splitlines()[-1] if detail else "unknown error"
+            return ToolResult(False, f"music generation failed: {last}")
+        saved = expected_out
+        if not Path(saved).is_file():
+            return ToolResult(False, "the music service finished without "
+                              f"writing {saved}")
+        try:
+            relative = Path(saved).resolve().relative_to(self.root)
+        except ValueError:
+            return ToolResult(False, f"the music service saved outside the "
+                              f"workspace: {saved}")
+        show = getattr(self._ui, "show_audio", None)
+        if callable(show):
+            try:
+                show(str(relative))
+            except Exception:  # noqa: BLE001 - a UI failure must not lose the file
+                pass
+        return ToolResult(True, f"music saved to {relative} "
+                          f"(playing for the operator); caption was: "
+                          f"{(caption or '')[:80]}")
+
     def load_skill(self, name: str) -> ToolResult:
         """Load one skill's full body on demand (progressive disclosure).
 
@@ -1393,6 +1538,47 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["prompt"],
+    ),
+    _schema(
+        "generate_music",
+        "Generate a music clip locally from a caption and play it to the "
+        "operator. Describe the music in the caption: genre, mood, "
+        "instrumentation, vocal style. Optional lyrics go in ``lyrics`` "
+        "(tag verses [verse]/[chorus]); empty lyrics means an "
+        "instrumental take. Keep clips short first -- about "
+        "two minutes of wait for every ten seconds of audio on this "
+        "GPU. The clip is saved under audio/ and rendered in the chat. "
+        "The music service and the text models share the one GPU; the "
+        "service frees the card for the run and returns it after, so "
+        "the turn is long but safe.",
+        {
+            "caption": {
+                "type": "string",
+                "description": "What the music sounds like: genre, mood, instruments, vocals",
+            },
+            "lyrics": {
+                "type": "string",
+                "description": "Optional lyrics, sections tagged [verse]/[chorus]; empty = instrumental take",
+                "default": "",
+            },
+            "duration": {
+                "type": "integer",
+                "description": "Clip length in seconds, 1-240 (default 30; "
+                               "card ceiling ~4 minutes)",
+                "default": 30,
+            },
+            "steps": {
+                "type": "integer",
+                "description": "Quality/speed trade-off, 10-60 (default 30)",
+                "default": 30,
+            },
+            "seed": {
+                "type": "integer",
+                "description": "Reproducibility seed (0 = time-based)",
+                "default": 0,
+            },
+        },
+        ["caption"],
     ),
     _schema(
         "load_skill",

@@ -305,6 +305,7 @@ details.code .code-copy:hover { color: var(--accent); }
   font-family: var(--mono); text-align: right; }
 img.gen { max-width: min(100%, 560px); border-radius: 8px;
   border: 1px solid var(--border); display: block; }
+audio.gen-audio { width: min(100%, 420px); display: block; }
 figure { margin: 0; position: relative; }
 figcaption { color: var(--faint); font-size: 11.5px;
   font-family: var(--mono); margin-top: 4px; }
@@ -639,6 +640,7 @@ dialog button.primary:hover { color: var(--accent-ink); }
   <span class="meta" id="meta">connecting…</span>
   <span id="branch-switcher" class="branch-switcher"></span>
   <button id="image-btn" class="hbtn" title="generate an image">🎨</button>
+  <button id="music-btn" class="hbtn" title="generate music">🎵</button>
   <button id="skills-btn" class="hbtn" title="skills & core">🧠</button>
   <button id="history-btn" class="hbtn" title="sessions">≡</button>
   <button id="options" class="hbtn" title="options">⚙</button>
@@ -773,6 +775,37 @@ dialog button.primary:hover { color: var(--accent-ink); }
     <button id="img-generate" class="primary">generate</button>
   </div>
 </dialog>
+<dialog id="music-dialog">
+  <h3>generate music</h3>
+  <div class="img-scroll">
+  <label class="opt-label">caption
+    <textarea id="music-caption" rows="3"
+      placeholder="genre, mood, instruments, vocal style"></textarea>
+  </label>
+  <label class="opt-label">lyrics <span class="opt-faint">(optional — tag
+    [verse]/[chorus]; leave empty for an instrumental take)</span>
+    <textarea id="music-lyrics" rows="4"
+      placeholder="[verse]&#10;..."></textarea>
+  </label>
+  <div class="img-grid">
+    <label class="opt-label">duration (seconds)
+      <input id="music-duration" type="number" min="1" max="240" value="30">
+    </label>
+    <label class="opt-label">steps
+      <input id="music-steps" type="number" min="10" max="60" value="30">
+    </label>
+    <label class="opt-label">seed
+      <input id="music-seed" type="number" min="0" placeholder="random">
+    </label>
+  </div>
+  <div class="opt-faint" style="font-size:11px;">about two minutes of
+    wait per ten seconds of audio on this GPU</div>
+  </div>
+  <div class="opt-actions">
+    <button id="music-cancel">cancel</button>
+    <button id="music-generate" class="primary">generate</button>
+  </div>
+</dialog>
 <dialog id="history-dialog">
   <h3>chats</h3>
   <div class="hist-actions">
@@ -808,6 +841,10 @@ dialog button.primary:hover { color: var(--accent-ink); }
   <div class="opt-row">
     <label class="opt-label">model image tool</label>
     <label class="switch"><input type="checkbox" id="opt-imagetool"><span></span></label>
+  </div>
+  <div class="opt-row">
+    <label class="opt-label">model music tool</label>
+    <label class="switch"><input type="checkbox" id="opt-musictool"><span></span></label>
   </div>
   <div class="opt-row">
     <label class="opt-label">tool output</label>
@@ -1419,6 +1456,8 @@ function wireSocket() {
       if (rs && m.reasoning) rs.value = m.reasoning;
       const itb = document.getElementById("opt-imagetool");
       if (itb && m.imagetool !== undefined) itb.checked = m.imagetool;
+      const mtb = document.getElementById("opt-musictool");
+      if (mtb && m.musictool !== undefined) mtb.checked = m.musictool;
       break;
     case "you":
       newTurn(); who("you", "you");
@@ -1547,6 +1586,39 @@ function wireSocket() {
         copyPrompt: req ? JSON.stringify(req, null, 2) : undefined,
         copyPromptIsJson: !!req,
       });
+      proseEl = null; proseRaw = ""; thinkEl = null;
+      genBar = null;
+      scroll();
+      break;
+    case "audio":
+      ensureTurn();
+      {
+        const fig = document.createElement("figure");
+        const aud = document.createElement("audio");
+        aud.className = "gen gen-audio";
+        aud.controls = true;
+        aud.preload = "metadata";
+        aud.src = "/image/" + encodeURIComponent(m.path);
+        fig.appendChild(aud);
+        const cap = document.createElement("figcaption");
+        cap.textContent = m.path + (m.label ? " · " + m.label : "");
+        fig.appendChild(cap);
+        turn.appendChild(fig);
+        // Copy carries the caption+lyrics that made the clip -- the
+        // human-usable content, never the filename (the path is in the
+        // caption already). Retry re-sends the request.
+        const req = m.request || null;
+        const captionText = req
+          ? String(req.caption || "") +
+            (req.lyrics ? String.fromCharCode(10) + String.fromCharCode(10)
+              + String(req.lyrics) : "")
+          : (m.path || "");
+        artifactButtons(m, {
+          copy: captionText,
+          retry: !!req,
+          request: req,
+        });
+      }
       proseEl = null; proseRaw = ""; thinkEl = null;
       genBar = null;
       scroll();
@@ -1780,6 +1852,14 @@ document.getElementById("form").addEventListener("submit", (e) => {
     }
     input.value = "";
     openImageDialog({ model: model, prompt: prompt });
+    return;
+  }
+  // A bare "/music" (optionally "<caption>") opens the music dialog
+  // instead of sending the command: same surface rule as /image.
+  if (!attach && (text === "/music" || text.startsWith("/music "))) {
+    const rest = text.slice("/music".length).trim();
+    input.value = "";
+    openMusicDialog({ caption: rest });
     return;
   }
   input.value = "";
@@ -2117,6 +2197,38 @@ document.getElementById("image-btn").addEventListener("click",
   () => openImageDialog(null));
 document.getElementById("img-cancel").addEventListener("click",
   () => imageDialog.close());
+
+const musicDialog = document.getElementById("music-dialog");
+function openMusicDialog(prefill) {
+  if (prefill && prefill.caption) {
+    document.getElementById("music-caption").value = prefill.caption;
+  }
+  musicDialog.showModal();
+  document.getElementById("music-caption").focus();
+}
+document.getElementById("music-btn").addEventListener("click",
+  () => openMusicDialog(null));
+document.getElementById("music-cancel").addEventListener("click",
+  () => musicDialog.close());
+document.getElementById("music-generate").addEventListener("click", () => {
+  const caption = document.getElementById("music-caption").value.trim();
+  if (!caption) {
+    document.getElementById("music-caption").focus();
+    return;
+  }
+  const payload = {
+    caption: caption,
+    lyrics: document.getElementById("music-lyrics").value.trim(),
+    duration: parseInt(
+      document.getElementById("music-duration").value, 10) || 30,
+    steps: parseInt(
+      document.getElementById("music-steps").value, 10) || 30,
+    seed: parseInt(
+      document.getElementById("music-seed").value, 10) || 0,
+  };
+  musicDialog.close();
+  ws.send(JSON.stringify({ music: payload }));
+});
 document.getElementById("img-generate").addEventListener("click", () => {
   const prompt = document.getElementById("img-prompt").value.trim();
   if (!prompt) {
@@ -2496,6 +2608,13 @@ imageToolBox.addEventListener("change", () => {
   ws.send(JSON.stringify({ text: "/imagetool "
     + (imageToolBox.checked ? "on" : "off") }));
 });
+// Music tool: same gate, same reasoning -- the operator decides whether
+// the MODEL may fire a minutes-long music run on its own initiative.
+const musicToolBox = document.getElementById("opt-musictool");
+musicToolBox.addEventListener("change", () => {
+  ws.send(JSON.stringify({ text: "/musictool "
+    + (musicToolBox.checked ? "on" : "off") }));
+});
 toolsSel.addEventListener("change", () => {
   ws.send(JSON.stringify({ text: "/tools " + toolsSel.value }));
 });
@@ -2649,12 +2768,12 @@ class WebChat(ChatUI):
         log = self._gen_log
         if log is not None and payload.get("kind") in (
                 "you", "assistant", "busy", "gen_progress", "image",
-                "raw", "error", "notice", "turn_end"):
+                "audio", "raw", "error", "notice", "turn_end"):
             # list.append is GIL-atomic; safe from the executor thread.
             log.append(dict(payload))
         relay = self._relay
         if relay is not None and payload.get("kind") in (
-                "busy", "gen_progress", "image", "raw", "error",
+                "busy", "gen_progress", "image", "audio", "raw", "error",
                 "notice", "turn_end"):
             # Peer tabs follow this run live. The publisher runs on the
             # event loop; this may be an executor thread, so schedule.
@@ -2809,6 +2928,17 @@ class WebChat(ChatUI):
                 pass
         self._frame(frame)
 
+    def show_audio(self, relative_path: str) -> None:
+        # Same contract as show_image: the clip renders in the chat as an
+        # <audio> element; the copy button carries the caption+lyrics
+        # that made it (the human-usable content), never the path.
+        frame: dict[str, Any] = {"kind": "audio", "path": relative_path}
+        reg = self._gen_registry
+        run = reg.get("active") if reg else None
+        if run is not None and run.get("request"):
+            frame["request"] = run["request"]
+        self._frame(frame)
+
     def gen_progress(self, phase: str, step: int, total: int) -> None:
         """A generation-progress frame: the page renders a live bar."""
         self._frame({"kind": "gen_progress", "phase": phase,
@@ -2854,6 +2984,35 @@ class WebChat(ChatUI):
             # The sidecar written at generation time carries the prompt
             # and knobs: replayed images keep their copy/retry buttons,
             # and "copy" means the PROMPT -- never the filename.
+            sidecar = path.with_suffix(".prompt")
+            try:
+                frame["request"] = json.loads(sidecar.read_text())
+            except (OSError, ValueError):
+                pass
+            frames.append(frame)
+            frames.append({"kind": "turn_end"})
+        return frames
+
+    def render_audio(self, owned: "list[str] | None" = None
+                     ) -> list[dict[str, Any]]:
+        """The audio-turn frames for a repaint -- same shape the live
+        path sends. Owned-list logic mirrors render_images: a chat
+        replays its own clips (by .prompt sidecar's owning chat), not
+        every era's audio."""
+        frames: list[dict[str, Any]] = []
+        try:
+            clips = sorted(
+                (self.ui_session_root() / "audio").glob("*.wav"),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            clips = []
+        if owned is not None:
+            wanted = set(owned)
+            clips = [p for p in clips if p.name in wanted]
+        for path in clips[:10]:
+            frames.append({"kind": "assistant"})
+            frame: dict[str, Any] = {"kind": "audio",
+                                     "path": f"audio/{path.name}"}
             sidecar = path.with_suffix(".prompt")
             try:
                 frame["request"] = json.loads(sidecar.read_text())
@@ -3350,6 +3509,9 @@ def main() -> int:
             #: this chat's image files (names under images/), in
             #: generation order. A chat repaints only its own images.
             self.images: list[str] = []
+            #: this chat's audio clips (names under audio/), same
+            #: ownership rule as images.
+            self.audio: list[str] = []
             #: The chat's UNANSWERED ask_form, when one is pending:
             #: the full frame, kept server-side so the question
             #: survives connects, reconnects and no-viewer windows.
@@ -3409,6 +3571,7 @@ def main() -> int:
                                          {"kind": "restore_begin"}]
         frames.extend(box.ui.render_history(box.ui.session.messages))
         frames.extend(box.ui.render_images(box.images))
+        frames.extend(box.ui.render_audio(box.audio))
         frames.append({"kind": "restore_end"})
         if broadcast_tree:
             frames.append({"kind": "tree", **box.tree.describe(),
@@ -3460,6 +3623,33 @@ def main() -> int:
                     if name_png not in names:
                         names.append(name_png)
         box.images = names
+
+    def _seed_chat_audio(box: "ChatBox") -> None:
+        """A chat's audio list, same two sources as images: its saved
+        history (generate_music tool results name the clip) and sidecar
+        ownership (the .prompt next to a .wav records the chat)."""
+        import re as _re
+
+        pat = _re.compile(r"audio/([\\w.\\-]+\\.wav)")
+        names: list[str] = []
+        for m in box.ui.session.messages:
+            for match in pat.finditer(str(m.get("content", ""))):
+                name = match.group(1)
+                if name not in names:
+                    names.append(name)
+        audio_dir = Path(str(box.ui.session.workspace.root)) / "audio"
+        if audio_dir.is_dir():
+            for side in sorted(audio_dir.glob("*.prompt"),
+                               key=lambda p: p.stat().st_mtime):
+                try:
+                    req = json.loads(side.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                owner = str(req.get("chat") or "")
+                name = side.stem + ".wav"
+                if owner == box.name and name not in names:
+                    names.append(name)
+        box.audio = names
 
     def build_chat(name: str) -> "ChatBox":
         """Build a chat from its session file (or fresh when the file
@@ -3541,6 +3731,9 @@ def main() -> int:
             box.log(frame)
         _seed_chat_images(box)
         for frame in ui.render_images(box.images):
+            box.log(frame)
+        _seed_chat_audio(box)
+        for frame in ui.render_audio(box.audio):
             box.log(frame)
         CHATS[name] = box
         return box
@@ -3708,6 +3901,12 @@ def main() -> int:
             # request with a reset connection) and brings the llm service
             # back, so the card can never be stranded. The runner's own
             # error path then sees the swap already handled.
+            # Music runs take the same route: the runner's engine dies
+            # when the card is pulled, and its finally-clause swap-back
+            # is idempotent, so /swap/llm here is safe and sufficient.
+            kind_word = "music generation" if (
+                run.get("request") and
+                "caption" in run["request"]) else "image generation"
             try:
                 with urllib.request.urlopen(
                         swap_api + "/state", timeout=2) as r:
@@ -3716,8 +3915,8 @@ def main() -> int:
                 state = {}
             await pub(box, {
                 "kind": "notice",
-                "text": "cancel: bringing the GPU back to the llm "
-                        "service (the image generation is stopped)"})
+                "text": f"cancel: bringing the GPU back to the llm "
+                        f"service (the {kind_word} is stopped)"})
             try:
                 request = urllib.request.Request(
                     swap_api + "/swap/llm", data=b"{}",
@@ -3809,6 +4008,7 @@ def main() -> int:
                           else ("on" if box.ui.session.config.thinking
                                 else "off")),
             "imagetool": not box.ui.session.config.no_image_tool,
+            "musictool": not box.ui.session.config.no_music_tool,
             "chat": box.name,
             "restored": len(box.history) > 0,
         })
@@ -4342,6 +4542,135 @@ def main() -> int:
                     pass
             return
 
+        async def run_music_op(box: "ChatBox", music: dict[str, Any]) -> None:
+            """One music generation (the dialog / typed op) as its own
+            task: the receive loop stays live, so a Cancel click from
+            the same tab mid-generation is actually heard. The op goes
+            through the model-facing generate_music tool, so the run
+            lifecycle matches the plain image path exactly."""
+            caption = str(music.get("caption") or "").strip()
+            if not caption:
+                await websocket.send_json({
+                    "kind": "notice",
+                    "text": "music generation needs a caption"})
+                return
+            args: dict[str, Any] = {"caption": caption}
+            lyrics = str(music.get("lyrics") or "").strip()
+            if lyrics:
+                args["lyrics"] = lyrics
+            try:
+                duration = int(music.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            if duration > 0:
+                args["duration"] = duration
+            try:
+                steps = int(music.get("steps") or 0)
+            except (TypeError, ValueError):
+                steps = 0
+            if steps > 0:
+                args["steps"] = steps
+            try:
+                seed = int(music.get("seed") or 0)
+            except (TypeError, ValueError):
+                seed = 0
+            if seed:
+                args["seed"] = seed
+            if GEN["active"] is not None:
+                await websocket.send_json({
+                    "kind": "notice",
+                    "text": "a generation is already "
+                            "running; it will stream here"})
+                return
+            req_echo = dict(args)
+            my_run = {"frames": [], "request": req_echo,
+                      "ended": 0.0, "box": box}
+            GEN["active"] = my_run
+            box.ui.set_gen_log(my_run["frames"])
+            box.ui.set_relay(None)
+            await bcast_pub({
+                "kind": "you",
+                "text": "/music " + caption})
+            await bcast_pub({"kind": "busy", "on": True})
+            await bcast_pub({
+                "kind": "gen_progress",
+                "phase": "generating music — freeing the GPU "
+                         "(swap / weight load)",
+                "step": 0, "total": 0})
+
+            def run_music(args=args):
+                return box.ui.session.workspace.call(
+                    "generate_music", args)
+
+            result = None
+            try:
+                result = await loop.run_in_executor(
+                    None, run_music)
+            except Exception as exc:  # noqa: BLE001
+                await bcast_pub({
+                    "kind": "error",
+                    "text": f"music generation failed: {exc}"})
+            finally:
+                box.ui.set_gen_log(None)
+                after: list[dict[str, Any]] = []
+                if result is not None and result.ok:
+                    after.append({
+                        "kind": "raw", "text": result.text})
+                    # The audio frame rides with the result frames --
+                    # built synchronously here, never scheduled live:
+                    # the clip must paint BEFORE turn_end closes the
+                    # turn (a live-scheduled send loses that race and
+                    # the tab disconnects without ever seeing it).
+                    clip_rel = None
+                    try:
+                        newest = max(
+                            (chat_config.root / "audio")
+                            .glob("*.wav"),
+                            key=lambda p: p.stat().st_mtime)
+                        clip_rel = f"audio/{newest.name}"
+                    except (OSError, ValueError):
+                        pass
+                    if clip_rel:
+                        after.append({
+                            "kind": "audio", "path": clip_rel,
+                            "request": req_echo})
+                    # Sidecar next to the clip so the disk-replay can
+                    # rebuild the request (copy = caption+lyrics,
+                    # retry = the full op), long after this run's
+                    # frames are gone. The OWNING CHAT rides along.
+                    try:
+                        newest = max(
+                            (chat_config.root / "audio")
+                            .glob("*.wav"),
+                            key=lambda p: p.stat().st_mtime)
+                        req_chat = dict(req_echo)
+                        req_chat["chat"] = box.name
+                        newest.with_suffix(".prompt").write_text(
+                            json.dumps(req_chat, indent=2))
+                        if newest.name not in box.audio:
+                            box.audio.append(newest.name)
+                    except (OSError, ValueError):
+                        pass
+                elif result is not None:
+                    after.append({
+                        "kind": "error", "text": result.text})
+                if GEN["active"] is not my_run:
+                    # Cancelled mid-flight: do_cancel already closed
+                    # this run; the late result must not overwrite it.
+                    return
+                run_rec = GEN["active"]
+                for frame in after:
+                    log_frame(run_rec, frame)
+                retire_run()
+                try:
+                    for frame in after:
+                        await chat_pub(box, frame)
+                    await chat_pub(box, {"kind": "turn_end"})
+                    await chat_pub(box, {"kind": "busy", "on": False})
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
         try:
             while True:
                 message = await websocket.receive_json()
@@ -4470,6 +4799,19 @@ def main() -> int:
                         if b.task is t:
                             b.task = None
                     task.add_done_callback(_retire_img)
+                    continue
+
+                music_msg = message.get("music")
+                if isinstance(music_msg, dict):
+                    # Same task discipline as image ops: a music run is
+                    # minutes long and Cancel must be hearable mid-run.
+                    task = asyncio.ensure_future(
+                        run_music_op(box, music_msg))
+                    box.task = task
+                    def _retire_music(t, b=box):
+                        if b.task is t:
+                            b.task = None
+                    task.add_done_callback(_retire_music)
                     continue
 
                 img_del = message.get("image_delete")

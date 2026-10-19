@@ -326,13 +326,18 @@ class ChatSession:
             TEXT_TOOL_PROTOCOL, TOOL_NAMES, TOOL_SCHEMAS, TOOLS_PLACEHOLDER,
             text_protocol_prompt as base_prompt,
         )
-        if not self.config.no_image_tool:
+        if not (self.config.no_image_tool or self.config.no_music_tool):
             return base_prompt(self.info is not None)
         from .infotools import INFO_TOOL_SCHEMAS
 
+        hidden: set[str] = set()
+        if self.config.no_image_tool:
+            hidden.add("generate_image")
+        if self.config.no_music_tool:
+            hidden.add("generate_music")
         lines = []
         schemas = [s for s in TOOL_SCHEMAS
-                   if s["function"]["name"] != "generate_image"]
+                   if s["function"]["name"] not in hidden]
         if self.info is not None:
             schemas = schemas + INFO_TOOL_SCHEMAS
         for schema in schemas:
@@ -406,8 +411,14 @@ class ChatSession:
                     "this conversation. Never call generate_image. When "
                     "the operator wants to work on an image prompt, "
                     "discuss and refine the prompt in plain prose -- "
-                    "they generate from the image dialog themselves."
-                )
+                    "they generate from the image dialog themselves.")
+            if self.config.no_music_tool:
+                parts.append(
+                    "Music generation is turned OFF by the operator for "
+                    "this conversation. Never call generate_music. When "
+                    "the operator wants to work on a music idea, discuss "
+                    "and refine the caption and lyrics in plain prose -- "
+                    "they generate from the music dialog themselves.")
             # Self-memorization: the memory is the model's own, and so is the
             # decision to use it. The instruction states the mechanic and the
             # judgement calls, not a schedule -- nothing is recalled or
@@ -582,13 +593,18 @@ class ChatSession:
         """The tool schemas offered this turn. The interactive-prompt
         mode (``no_image_tool``) removes generate_image entirely: a
         model told not to generate must not be handed the handle to a
-        multi-minute GPU swap it can pull anyway."""
+        multi-minute GPU swap it can pull anyway. ``no_music_tool``
+        does the same for generate_music -- same reasoning, longer
+        runs."""
         from .infotools import INFO_TOOL_SCHEMAS
 
         schemas = list(TOOL_SCHEMAS)
         if self.config.no_image_tool:
             schemas = [s for s in schemas
                        if s["function"]["name"] != "generate_image"]
+        if self.config.no_music_tool:
+            schemas = [s for s in schemas
+                       if s["function"]["name"] != "generate_music"]
         return schemas + INFO_TOOL_SCHEMAS + self._mcp_schemas()
 
     def _turn(self) -> tuple[str, str, list[tuple[str, dict[str, Any]]], TurnStats]:
@@ -770,6 +786,20 @@ class ChatSession:
                     {"role": "tool", "tool_name": name,
                      "content": "generate_image -> error\n"
                                  "refused: image generation is off"})
+                continue
+            if name == "generate_music" and self.config.no_music_tool:
+                # Same refusal contract as generate_image: minutes-long
+                # GPU run, operator turned it off, the call must not
+                # fire anyway.
+                result = ToolResult(
+                    False, "music generation is turned off by the "
+                    "operator for this conversation; refine the caption "
+                    "and lyrics in prose instead")
+                self.hooks.tool_result(name, result)
+                self.messages.append(
+                    {"role": "tool", "tool_name": name,
+                     "content": "generate_music -> error\n"
+                                 "refused: music generation is off"})
                 continue
             if name in info_names and self.info is not None:
                 result = self.info.call(name, arguments)
@@ -1086,6 +1116,28 @@ class ChatSession:
         ``/image`` command did.
         """
         show = getattr(self.hooks, "show_image", None)
+        if callable(show):
+            try:
+                show(str(relative_path))
+            except Exception:  # noqa: BLE001 - a render failure must not lose the file
+                pass
+
+    def show_audio(self, relative_path: str) -> None:
+        """A generated audio clip: forward it to the bound front end.
+
+        Same forwarding contract as show_image -- the workspace holds
+        this session as ``ui``, the tool's lookup lands here, and the
+        hooks decide what showing means (the web sends an audio frame
+        with the <audio> element). Suppressed while the front end is
+        running a generation (its ``_gen_log`` is attached): the run
+        builds the audio frame into its own result list and delivers
+        it synchronously with the terminal frames -- a live-scheduled
+        send loses the race with turn_end and the clip never renders.
+        """
+        hooks = self.hooks
+        if getattr(hooks, "_gen_log", None) is not None:
+            return  # the owning run delivers the frame itself
+        show = getattr(hooks, "show_audio", None)
         if callable(show):
             try:
                 show(str(relative_path))

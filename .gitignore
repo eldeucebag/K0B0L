@@ -20,3 +20,4 @@ game.py
 # (kept out: 3.3 MB of fetched vendor prompts, restorable on demand)
 system-prompts/
 *.bak
+audio/

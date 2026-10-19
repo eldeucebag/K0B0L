@@ -61,6 +61,9 @@ HELP = """commands
   /history           messages held, and how many tool calls have run
   /compact           summarize the conversation and continue from the summary
   /image [model] <prompt>   generate an image locally (pony|qwen|chroma)
+  /music [caption]  generate music locally (opens the dialog in the webui)
+  /imagetool on|off the model may/cannot generate images itself
+  /musictool on|off the model may/cannot generate music itself
   /exit              leave (ctrl-d works too)
 """
 
@@ -371,6 +374,24 @@ class ChatUI(ChatHooks):
                 self.line(f"image tool is "
                           f"{'off' if state else 'on'}; "
                           "use /imagetool on|off")
+        elif command == "/musictool":
+            # Same contract for music: on = the model may generate
+            # music itself; off = generate_music is withheld entirely
+            # so the operator refines captions/lyrics in prose without
+            # the model firing a minutes-long GPU run unprompted.
+            if argument in ("on", "off"):
+                self.rebuild(no_music_tool=argument == "off")
+                self.line("music tool is "
+                          + ("off — the model cannot generate music; "
+                             "work captions and lyrics in prose (the 🎵 "
+                             "dialog still works for you)"
+                             if argument == "off"
+                             else "on — the model can generate music"))
+            else:
+                state = self.session.config.no_music_tool
+                self.line(f"music tool is "
+                          f"{'off' if state else 'on'}; "
+                          "use /musictool on|off")
         elif command == "/reason":
             # GENERATION of reasoning, not its display (/think): off
             # asks the model for no reasoning tokens at all (CHAT_THINK

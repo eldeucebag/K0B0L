@@ -229,6 +229,11 @@ class ChatConfig:
     #: with an explanation instead of silently generating -- the model
     #: ignoring "do not generate" must not cost a GPU swap cycle.
     no_image_tool: bool = False
+    #: Same contract for music: minutes-long GPU runs the model must
+    #: not fire on its own initiative when the operator turned them
+    #: off. generate_music is withheld from the protocol, and a call
+    #: that slips through is refused with the reason.
+    no_music_tool: bool = False
     #: Files the chat may touch. Kept here explicit so a run control command
     #: never silently widens them.
     skills_dir: Path = field(default_factory=lambda: Path("skills"))

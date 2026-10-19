@@ -8,7 +8,10 @@ processes and swaps them on request:
 
   GET  /state                which service is up, and what models exist
   POST /swap/image  {"model": "pony"}   stop llama, start sd-server
-  POST /swap/llm             stop sd-server, start the llama router
+  POST /swap/llm             stop sd-server (and any music engine),
+                             start the llama router
+  POST /swap/music           stop llama + sd, free the card for a
+                             one-shot music run (audio.cpp)
 
 Clients (the harness's generate_image path, /image, or a human with
 curl) swap, use the service, and swap back when done. Each swap is a
@@ -182,7 +185,40 @@ def stop_sd() -> None:
     time.sleep(1)
     current_image_model = None
     _reap(_sd_process)
-    _sd_process = None
+
+
+MUSIC_PID_FILE = "/tmp/k0b0l-music-engine.pid"
+
+
+def stop_music_engine() -> None:
+    """Kill a registered music engine (audio.cpp one-shot CLI) if one
+    is running. The runner registers its PID at spawn and unregisters
+    at exit; a stale file (crash) is cleaned as a no-op. Without this,
+    a Cancel mid-generation would leave the CLI holding the card while
+    llama tries to load."""
+    try:
+        pid = int(open(MUSIC_PID_FILE).read().strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(0.5)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        os.unlink(MUSIC_PID_FILE)
+    except OSError:
+        pass
 
 
 def start_llama() -> None:
@@ -270,6 +306,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/swap/llm":
             with _STATE_LOCK:
                 stop_sd()
+                stop_music_engine()
                 stop_llama()
                 start_llama()
             deadline = time.time() + 120
@@ -281,8 +318,21 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(1)
             self._json(503, {"ok": False,
                              "error": f"llama did not come up; see {LLAMA_LOG}"})
+        elif self.path == "/swap/music":
+            # Music generation (audio.cpp / MiniMax-Music3) is a one-shot
+            # CLI: it owns the whole card for minutes per run, so the
+            # "swap" is really "free the card, mark it music-busy, and
+            # wait for the runner to POST /swap/llm when it finishes" --
+            # exactly the image-run interlock, minus a persistent server.
+            with _STATE_LOCK:
+                stop_sd()
+                stop_music_engine()
+                stop_llama()
+            self._json(200, {"ok": True, "service": "music",
+                             "note": "card freed; the music runner owns "
+                                     "it; POST /swap/llm to restore"})
         else:
-            self._json(404, {"error": "POST /swap/image | /swap/llm"})
+            self._json(404, {"error": "POST /swap/image | /swap/llm | /swap/music"})
 
     def log_message(self, fmt, *args) -> None:  # quiet
         pass
