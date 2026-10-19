@@ -4548,6 +4548,39 @@ def main() -> int:
             the same tab mid-generation is actually heard. The op goes
             through the model-facing generate_music tool, so the run
             lifecycle matches the plain image path exactly."""
+            # HARD GUARD: ensure the GPU is truly free before starting.
+            # The swap supervisor stops services, but a running llama
+            # model keeps its VRAM until evicted. Force unload first.
+            try:
+                target_url = swap_api + "/swap/music"
+                print(f"DEBUG: calling swap_api={target_url}", file=sys.stderr, flush=True)
+                request = urllib.request.Request(
+                    target_url, data=b"{}",
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=180) as r:
+                    json.loads(r.read())
+            except Exception as exc:  # noqa: BLE001
+                await websocket.send_json({
+                    "kind": "error",
+                    "text": f"failed to free the GPU for music: {exc}"})
+                return
+            # Wait for the card to report free
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                try:
+                    with urllib.request.urlopen(
+                            swap_api + "/state", timeout=2) as r:
+                        state = json.loads(r.read())
+                    if not state.get("llm", True):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            else:
+                await websocket.send_json({
+                    "kind": "error",
+                    "text": "GPU did not free in time; try again"})
+                return
             caption = str(music.get("caption") or "").strip()
             if not caption:
                 await websocket.send_json({

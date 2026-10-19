@@ -36,6 +36,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,9 @@ SKIP_DIRS = frozenset(
         "venv",
     }
 )
+
+#: Swap supervisor endpoint. Defaults to localhost:7861; overridden by K0B0L_SWAP_API.
+SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
 
 
 class ToolError(RuntimeError):
@@ -1087,6 +1091,31 @@ class Workspace:
                      int(step_match.group(2)))
             elif callable(emit):
                 emit(body, 0, 0)
+
+        # HARD GUARD: ensure the GPU is truly free before starting.
+        # The swap supervisor stops services, but a running llama
+        # model keeps its VRAM until evicted. Force unload first.
+        try:
+            subprocess.run(  # noqa: S603 - argv list, no shell
+                [sys.executable, str(runner), "swapfree"],
+                capture_output=True, text=True, timeout=180)
+        except Exception as exc:
+            return ToolResult(False, f"failed to free the GPU for music: {exc}")
+
+        # Wait for the swap server to report llm=false
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                        SWAP_API.rstrip("/") + "/state", timeout=2) as r:
+                    state = json.loads(r.read())
+                if not state.get("llm", True):
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            return ToolResult(False, "GPU did not free in time; try again")
 
         try:
             process = subprocess.Popen(  # noqa: S603 - argv list, no shell

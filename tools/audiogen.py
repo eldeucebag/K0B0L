@@ -232,14 +232,21 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
 
 
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] not in ("gen", "swapback", "state"):
+    if not argv or argv[0] not in ("gen", "swapfree", "swapback", "state"):
         print("usage: audiogen.py gen <caption> [--lyrics TEXT] "
               "[--duration N] [--steps N] [--seed N] [--out PATH] | "
-              "swapback | state", file=sys.stderr)
+              "swapfree | swapback | state", file=sys.stderr)
         return 2
     if argv[0] == "swapback":
         swap_back_to_llm()
         print("swap-back requested", file=sys.stderr)
+        return 0
+    if argv[0] == "swapfree":
+        ok, body = _post("/swap/music", b"{}", timeout=200)
+        if not ok:
+            print(f"swap supervisor refused: {body}", file=sys.stderr)
+            return 1
+        print("swap-free requested", file=sys.stderr)
         return 0
     if argv[0] == "state":
         try:
