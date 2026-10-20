@@ -119,7 +119,8 @@ def _progress(current: int, total: int) -> None:
 
 
 def generate(caption: str, out_path: Path, lyrics: str = "",
-             duration: int = 0, steps: int = 0, seed: int = 0) -> bool:
+             duration: int = 0, steps: int = 0, seed: int = 0,
+             decode_graph_arena_mb: int = 0) -> bool:
     """Run one generation; returns True iff ``out_path`` exists after."""
     if not ENGINE_CLI.is_file():
         print(f"music engine not built: {ENGINE_CLI}", file=sys.stderr)
@@ -159,6 +160,8 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
             argv += ["--request-option", f"num_inference_steps={steps}"]
         if seed:
             argv += ["--request-option", f"seed={seed}"]
+        if decode_graph_arena_mb:
+            argv += ["--request-option", f"minimax_music3.decode_graph_arena_mb={decode_graph_arena_mb}"]
         env = dict(os.environ, GGML_CUDA_NO_VMM="1")
 
         process = subprocess.Popen(  # noqa: S603 - argv list, no shell
@@ -173,6 +176,13 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
         sel = selectors.DefaultSelector()
         sel.register(process.stdout, selectors.EVENT_READ)
         sel.register(process.stderr, selectors.EVENT_READ)
+        # Heartbeat: the engine is silent for the whole multi-minute AR
+        # decode (a 120 s request runs 20+ min with zero log lines), and
+        # silence on the wire is indistinguishable from a stall. A phase
+        # marker every 15 s keeps the UI's elapsed/working label visibly
+        # alive and proves the runner loop itself is healthy.
+        last_beat = time.monotonic()
+        beat_index = 0
         try:
             while True:
                 events = sel.select(timeout=1.0)
@@ -195,11 +205,18 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
                         if any(word in clean for word in
                                ("phase", "stage", "progress", "loaded")):
                             _phase(clean[:120])
+                    last_beat = time.monotonic()
                 if process.poll() is not None:
                     for stream in (process.stdout, process.stderr):
                         for line in stream:
                             pass
                     break
+                if time.monotonic() - last_beat >= 15.0:
+                    beat_index += 1
+                    elapsed = time.monotonic() - started
+                    _phase(f"generating · {elapsed:.0f}s elapsed"
+                           f"{' · still working' if beat_index > 1 else ''}")
+                    last_beat = time.monotonic()
                 if time.monotonic() > deadline:
                     process.kill()
                     process.wait()
@@ -262,6 +279,7 @@ def main(argv: list[str]) -> int:
     duration = 0
     steps = 0
     seed = 0
+    decode_graph_arena_mb = 0
     out = OUT_DIR / f"music-{int(time.time())}.wav"
     i = 2
     while i < len(argv):
@@ -278,6 +296,9 @@ def main(argv: list[str]) -> int:
         elif flag == "--seed":
             seed = int(value or 0)
             i += 2
+        elif flag == "--decode-graph-arena-mb":
+            decode_graph_arena_mb = int(value or 0)
+            i += 2
         elif flag == "--out":
             out = Path(value)
             i += 2
@@ -285,7 +306,7 @@ def main(argv: list[str]) -> int:
             print(f"unknown flag: {flag}", file=sys.stderr)
             return 2
     ok = generate(caption, out, lyrics=lyrics, duration=duration,
-                  steps=steps, seed=seed)
+                  steps=steps, seed=seed, decode_graph_arena_mb=decode_graph_arena_mb)
     if not ok:
         return 1
     print(f"saved {out}")

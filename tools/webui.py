@@ -794,6 +794,9 @@ dialog button.primary:hover { color: var(--accent-ink); }
     <label class="opt-label">steps
       <input id="music-steps" type="number" min="10" max="60" value="30">
     </label>
+    <label class="opt-label">decode graph arena (MB)
+      <input id="music-decode-arena" type="number" min="32" max="4096" value="2048">
+    </label>
     <label class="opt-label">seed
       <input id="music-seed" type="number" min="0" placeholder="random">
     </label>
@@ -912,6 +915,7 @@ let typingEl = null;
 let busyTimer = null;
 let busyStart = null;
 let busy = false;
+let busyActivity = "";  // last observable action, for the workbar label
 let proseRaw = "";   // un-marked-up model text for the open prose block
 
 function paintProse() {
@@ -942,6 +946,17 @@ function setBusy(on) {
   }
   if (on && !busyStart) {
     busyStart = Date.now();
+    // The transcript-level workbar: the header dots are easy to miss
+    // and say nothing about what the model is doing. This strip pulses
+    // for the whole turn -- including the long silent stretches (a big
+    // tool-call JSON being streamed inside a held fence, a minutes-long
+    // GPU run) where previously nothing on the page moved at all.
+    const bar = ensureGenbar();
+    bar.classList.add("indeterminate");
+    if (genLabel) {
+      genLabel.textContent = "working · 0s · "
+        + (busyActivity || "starting");
+    }
     clearInterval(busyTimer);
     busyTimer = setInterval(() => {
       if (busyStart) {
@@ -949,6 +964,13 @@ function setBusy(on) {
         if (typingEl) {
           const clock = typingEl.querySelector(".busyclock");
           if (clock) clock.textContent = secs + "s";
+        }
+        // The bar label carries the elapsed time and what last moved:
+        // "working · 87s · streaming" distinguishes a live turn from a
+        // wedged one at a glance.
+        if (genLabel) {
+          genLabel.textContent = "working · " + secs + "s · "
+            + (busyActivity || "starting");
         }
       }
     }, 1000);
@@ -960,6 +982,9 @@ function setBusy(on) {
       const clock = typingEl.querySelector(".busyclock");
       if (clock) clock.textContent = "";
     }
+    // busy-off is a turn-level terminal signal: the live strip must
+    // go with it (completion, cancel, failure -- every path).
+    removeGenbar();
   }
 }
 
@@ -1281,6 +1306,41 @@ function ensureTurn() {
   // kills every later frame in the batch -- the "stalled" webui.
   if (!turn) newTurn();
 }
+
+function ensureGenbar() {
+  // The one progress strip per turn: created by a gen_progress frame
+  // (image/music runs) or by the busy indicator (plain model turns),
+  // whichever comes first -- the second merely reuses it.
+  ensureTurn();
+  if (!genBar) {
+    const wrap = document.createElement("div");
+    wrap.className = "genbar-wrap";
+    genLabel = document.createElement("div");
+    genLabel.className = "genbar-label";
+    genBar = document.createElement("div");
+    genBar.className = "genbar";
+    const fill = document.createElement("div");
+    fill.className = "fill";
+    genBar.appendChild(fill);
+    wrap.appendChild(genLabel);
+    wrap.appendChild(genBar);
+    turn.appendChild(wrap);
+    scroll();
+  }
+  return genBar;
+}
+
+function removeGenbar() {
+  // The strip is a LIVE indicator only: it must never linger in the
+  // transcript after the artifact landed, the run failed, or the turn
+  // ended -- a leftover pulsing bar reads as a stalled generation.
+  if (genBar) {
+    const wrap = genBar.closest(".genbar-wrap");
+    if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
+    genBar = null;
+    genLabel = null;
+  }
+}
 function who(name, cls) {
   ensureTurn();
   const row = document.createElement("div");
@@ -1481,14 +1541,32 @@ function wireSocket() {
       if (busy) setBusy(true);  // busy can precede the row it belongs to
       break;
     case "busy":
+      // Replayed busy frames are history, not a live run: painting the
+      // workbar from them litters dead pulsing strips across restored
+      // turns. The replay's turn_end frames close the turns; live runs
+      // still get the bar from setBusy's own ensureGenbar call.
+      if (restoring) break;
       setBusy(m.on);
       break;
     case "delta":
+      busyActivity = "streaming";
+      // Immediate label refresh: the 1 s busy tick is too coarse to
+      // prove liveness by itself -- the activity word must move the
+      // moment a frame lands.
+      if (genLabel && busyStart) {
+        genLabel.textContent = "working · "
+          + Math.round((Date.now() - busyStart) / 1000) + "s · streaming";
+      }
       if (!proseEl) { proseEl = el("div", "prose md"); }
       proseRaw += m.text;
       paintProse(); scroll();
       break;
     case "thinking":
+      busyActivity = "thinking";
+      if (genLabel && busyStart) {
+        genLabel.textContent = "working · "
+          + Math.round((Date.now() - busyStart) / 1000) + "s · thinking";
+      }
       if (!thinkEl) {
         const d = document.createElement("details");
         d.className = "think"; d.open = m.show !== false;
@@ -1503,9 +1581,16 @@ function wireSocket() {
     case "tool_call":
       // A panel ends any open prose/thinking run: later deltas must
       // create fresh elements so the transcript order matches the frames.
+      busyActivity = "tool: " + (m.text || "").split("(")[0];
+      if (genLabel && busyStart) {
+        genLabel.textContent = "working · "
+          + Math.round((Date.now() - busyStart) / 1000) + "s · "
+          + busyActivity;
+      }
       proseEl = null; proseRaw = ""; thinkEl = null;
       el("div", "tool call", m.text); scroll(); break;
     case "tool_result":
+      busyActivity = "tool result";
       const r = el("div", "tool result" + (m.ok ? "" : " error"));
       r.textContent = m.text;
       proseEl = null; proseRaw = ""; thinkEl = null; scroll(); break;
@@ -1537,6 +1622,7 @@ function wireSocket() {
     case "notice":
       el("div", "notice", m.text); scroll(); break;
     case "error":
+      removeGenbar();  // a failed run must not leave a pulsing strip behind
       el("div", "errorline", m.text); scroll(); break;
     case "status":
       el("div", "statusline", m.text); scroll(); break;
@@ -1586,6 +1672,7 @@ function wireSocket() {
         copyPrompt: req ? JSON.stringify(req, null, 2) : undefined,
         copyPromptIsJson: !!req,
       });
+      removeGenbar();  // the artifact is the outcome; the live strip goes
       proseEl = null; proseRaw = ""; thinkEl = null;
       genBar = null;
       scroll();
@@ -1619,27 +1706,15 @@ function wireSocket() {
           request: req,
         });
       }
+      removeGenbar();  // the clip is the outcome; the live strip goes
       proseEl = null; proseRaw = ""; thinkEl = null;
       genBar = null;
       scroll();
       break;
     case "gen_progress":
-      ensureTurn();
-      if (!genBar) {
-        const wrap = document.createElement("div");
-        wrap.className = "genbar-wrap";
-        genLabel = document.createElement("div");
-        genLabel.className = "genbar-label";
-        genBar = document.createElement("div");
-        genBar.className = "genbar";
-        const fill = document.createElement("div");
-        fill.className = "fill";
-        genBar.appendChild(fill);
-        wrap.appendChild(genLabel);
-        wrap.appendChild(genBar);
-        turn.appendChild(wrap);
-        scroll();
-      }
+      busyActivity = m.phase || "generating";
+      if (restoring) break;  // history: a dead progress bar is noise
+      ensureGenbar();
       if (m.total > 0 && m.step > 0) {
         genBar.classList.remove("indeterminate");
         const pct = Math.min(100, Math.round(100 * m.step / m.total));
@@ -1653,9 +1728,11 @@ function wireSocket() {
       scroll();
       break;
     case "turn_end":
+      removeGenbar();  // terminal on every path: done, cancelled, failed
       setBusy(false);
       turn = null; proseEl = null; proseRaw = ""; thinkEl = null;
       whoEl = null; typingEl = null;
+      busyActivity = "";
       forceScroll = false;   // a finished turn ends the forced follow
       input.focus();
       persistCache();
@@ -2223,6 +2300,8 @@ document.getElementById("music-generate").addEventListener("click", () => {
       document.getElementById("music-duration").value, 10) || 30,
     steps: parseInt(
       document.getElementById("music-steps").value, 10) || 30,
+    decode_graph_arena_mb: parseInt(
+      document.getElementById("music-decode-arena").value, 10) || 2048,
     seed: parseInt(
       document.getElementById("music-seed").value, 10) || 0,
   };
@@ -4609,6 +4688,12 @@ def main() -> int:
                 seed = 0
             if seed:
                 args["seed"] = seed
+            try:
+                decode_graph_arena_mb = int(music.get("decode_graph_arena_mb") or 0)
+            except (TypeError, ValueError):
+                decode_graph_arena_mb = 0
+            if decode_graph_arena_mb:
+                args["decode_graph_arena_mb"] = decode_graph_arena_mb
             if GEN["active"] is not None:
                 await websocket.send_json({
                     "kind": "notice",
