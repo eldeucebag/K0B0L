@@ -7,16 +7,26 @@
 #   * the PrismML llama.cpp fork (the ONLY server that loads the ternary
 #     Bonsai quants: PTQ1_0 / PQ2_0 — stock llama.cpp and Ollama reject them)
 #   * sd.cpp (stable-diffusion.cpp) for the image API, built with CUDA
-#   * every LLM and image model the harness names, downloaded and pinned
+#   * audio.cpp for the music API (MiniMax-Music3), built with CUDA on
+#     Linux/macOS — Windows uses the prebuilt cuda12.4/cuda13.3 zip and
+#     the matching cudart zip, or WSL2
+#   * every LLM, image, and music model the harness names, downloaded and
+#     pinned — including the HQ music set (q8_0 flow transformer + bf16
+#     depth decoder) that makes high step counts pay off
 #   * the router preset (models.ini), the image server, the GPU swap
 #     supervisor, and systemd units — or launchd on macOS
 #
 # Platforms, honestly ranked: Linux (systemd+NVIDIA) is the supported
 # path and what this box runs. macOS runs the llama fork's Metal build
-# and sd.cpp CPU/Metal with CPU-only image gen (slow but works); its
-# supervisor uses launchd. Windows is documented at the bottom — the
-# fork ships Windows CUDA binaries but there is no supervisor; the
-# swap must be done by hand with rt-image-server.sh / the router.
+# and sd.cpp/audio.cpp CPU/Metal with CPU-only image and music gen
+# (slow but works); its supervisor uses launchd. Windows has a native
+# path now — setup_full.ps1 (PowerShell): llama router + models +
+# webui natively; audio.cpp via its prebuilt CUDA zips; sd.cpp builds
+# from source — but the swap supervisor is POSIX-only, so on native
+# Windows only one GPU service runs at a time (stop llama before a
+# music/image run). WSL2 runs this script as-is with the Windows
+# NVIDIA driver and gets the full supervised swap — that is the
+# recommended Windows route for the whole stack.
 #
 # The script never deletes or modifies an existing setup: every install
 # step is idempotent (skip when its target already exists) and every
@@ -30,9 +40,10 @@
 #   bash setup_full.sh --skip-models    # code only, no multi-GB downloads
 #   bash setup_full.sh --no-services    # skip systemd/launchd entirely
 #
-# Disk: ~55 GB with every model. VRAM: 8 GB is the design point (one
-# resident LLM or one image model — the swap supervisor trades the card
-# between them).
+# Disk: ~70 GB with every model (LLMs ~14 GB, images ~26 GB, music
+# ~10 GB stock + ~4 GB HQ). VRAM: 8 GB is the design point (one
+# resident LLM, or one image model, or one music run — the swap
+# supervisor trades the card between them).
 # ============================================================================
 set -euo pipefail
 
@@ -42,6 +53,9 @@ set -euo pipefail
 K0B0L_HOME="${K0B0L_HOME:-$HOME/k0b0l}"
 LLAMA_DIR="$K0B0L_HOME/llama-prism"           # the fork's binaries
 SD_DIR="$K0B0L_HOME/sd-cpp"                   # stable-diffusion.cpp
+AUDIO_DIR="$K0B0L_HOME/audio.cpp"             # audio.cpp (music engine)
+MUSIC_MODELS_DIR="${K0B0L_MUSIC_MODELS:-$K0B0L_HOME/models/MiniMax-Music3-GGUF}"
+MUSIC_HQ_DIR="${K0B0L_MUSIC_HQ_DIR:-$K0B0L_HOME/models/minimax-hq}"
 MODELS_DIR="${K0B0L_IMAGE_MODELS:-$K0B0L_HOME/models}"
 LLM_MODELS_DIR="$LLAMA_DIR/models"             # the router's --models-dir
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # harness repo
@@ -181,6 +195,42 @@ fi
 export K0B0L_SD_BIN="$SD_DIR/build/bin/sd-cli"
 
 # ---------------------------------------------------------------------------
+# 3b. audio.cpp — the music engine (MiniMax-Music3 via tools/audiogen.py)
+# ---------------------------------------------------------------------------
+# The same ggml build recipe as sd.cpp with the known-good toolchain pair:
+# the PATH nvcc may be stale (11.5 on the reference box) and only g++-12
+# pairs with CUDA 12.5. GGML_CUDA_NO_VMM=1 is set by the runner (Pascal's
+# cuMemCreate path dies mid-run; the legacy pool allocator works).
+AUDIO_TAG="v0.9.2-drama3-base-small"
+if [ -x "$AUDIO_DIR/build/bin/audiocpp_cli" ]; then
+  ok "audio.cpp already built at $AUDIO_DIR (left untouched)"
+else
+  say "building audio.cpp (CUDA)..."
+  git clone --depth 1 --branch "$AUDIO_TAG" \
+    https://github.com/0xShug0/audio.cpp "$AUDIO_DIR" 2>/dev/null \
+    || git clone --depth 1 https://github.com/0xShug0/audio.cpp "$AUDIO_DIR"
+  # Toolchain pair, with fallbacks when a CUDA toolkit/gcc generation is
+  # absent: newest /usr/local/cuda-* wins, plain nvcc/g++ last resort.
+  CUDA_ROOT="$(ls -d /usr/local/cuda-1[2-9]* 2>/dev/null | tail -1)"
+  if [ -n "$CUDA_ROOT" ] && [ -x "$CUDA_ROOT/bin/nvcc" ] && command -v g++-12 >/dev/null; then
+    cmake -S "$AUDIO_DIR" -B "$AUDIO_DIR/build" \
+      -DENGINE_ENABLE_CUDA=ON \
+      -DCUDAToolkit_ROOT="$CUDA_ROOT" \
+      -DCMAKE_CUDA_COMPILER="$CUDA_ROOT/bin/nvcc" \
+      -DCMAKE_CUDA_ARCHITECTURES=61 \
+      -DCMAKE_CXX_COMPILER=g++-12 -DCMAKE_BUILD_TYPE=Release
+  else
+    warn "pinned CUDA 12.5 + g++-12 pair not found; building with defaults"
+    cmake -S "$AUDIO_DIR" -B "$AUDIO_DIR/build" \
+      -DENGINE_ENABLE_CUDA=ON \
+      -DCMAKE_CUDA_ARCHITECTURES=61 \
+      -DCMAKE_BUILD_TYPE=Release
+  fi
+  cmake --build "$AUDIO_DIR/build" --config Release -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+  ok "audio.cpp built: $AUDIO_DIR/build/bin/audiocpp_cli"
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Python environment (the harness + the web front end)
 # ---------------------------------------------------------------------------
 say "python dependencies..."
@@ -255,6 +305,59 @@ else
   hf silveroxides/Chroma-GGUF chroma-unlocked-v44/chroma-unlocked-v44-Q4_0.gguf chroma-v44-unlocked-Q4_0.gguf 5.43G
   hf city96/t5-v1_1-xxl-encoder-gguf t5-v1_1-xxl-encoder-Q4_K_M.gguf t5-v1_1-xxl-encoder-Q4_K_M.gguf 2.9G
   hf foxmail/flux_vae ae.safetensors flux_vae.safetensors 335M
+
+  # ---- music models (MiniMax-Music3, named exactly as tools/audiogen.py
+  # expects). Stock set: the q4_0 LM + q4_0 flow transformer + q8_0 depth
+  # decoder that fit an 8 GB card. HQ set: q8_0 flow transformer + bf16
+  # depth decoder (the denoiser upgrade that makes high step counts pay
+  # off); the q8_0 LM is deliberately NOT downloaded — the engine
+  # cudaMallocs the full weight buffer on device and 9.4 GiB cannot fit.
+  say "downloading music models (MiniMax-Music3)..."
+  music() {  # music <remote-file> [hq]
+    local dest
+    if [ "${2:-}" = "hq" ]; then
+      dest="$MUSIC_HQ_DIR/$1"
+    else
+      dest="$MUSIC_MODELS_DIR/$1"
+    fi
+    [ -f "$dest" ] && { ok "music model present: $1"; return 0; }
+    say "downloading $1..."
+    mkdir -p "$(dirname "$dest")"
+    curl -fL --retry 5 -C - -o "$dest.part" \
+      "https://huggingface.co/audio-cpp/MiniMax-Music3-GGUF/resolve/main/$1"
+    mv "$dest.part" "$dest"
+    ok "music model downloaded: $1"
+  }
+  # stock set (all required)
+  for f in config.json condition_encoder.gguf language_model_q4_0.gguf \
+           rvq_depth_decoder_q8_0.gguf transformer_q4_0.gguf vocoder.gguf; do
+    music "$f"
+  done
+  # config/ and tokenizer/ trees: every file the assets loader names
+  mkdir -p "$MUSIC_MODELS_DIR/config" "$MUSIC_MODELS_DIR/tokenizer"
+  for f in language_model.json rvq_depth_decoder.json condition_encoder.json transformer.json vocoder.json; do
+    [ -f "$MUSIC_MODELS_DIR/config/$f" ] || curl -sfL --retry 5 \
+      -o "$MUSIC_MODELS_DIR/config/$f" \
+      "https://huggingface.co/audio-cpp/MiniMax-Music3-GGUF/resolve/main/config/$f"
+  done
+  for f in tokenizer.json tokenizer_config.json; do
+    [ -f "$MUSIC_MODELS_DIR/tokenizer/$f" ] || curl -sfL --retry 5 \
+      -o "$MUSIC_MODELS_DIR/tokenizer/$f" \
+      "https://huggingface.co/audio-cpp/MiniMax-Music3-GGUF/resolve/main/tokenizer/$f"
+  done
+  ok "music stock set complete: $MUSIC_MODELS_DIR"
+  # HQ set (optional but recommended: ~3.9 GB) — symlinked to the stock
+  # root's shared components, real files only for the two upgrades.
+  if [ "${K0B0L_NO_MUSIC_HQ:-0}" != "1" ]; then
+    mkdir -p "$MUSIC_HQ_DIR"
+    for f in config config.json tokenizer condition_encoder.gguf \
+             language_model_q4_0.gguf rvq_depth_decoder_q8_0.gguf vocoder.gguf; do
+      [ -e "$MUSIC_HQ_DIR/$f" ] || ln -s "$MUSIC_MODELS_DIR/$f" "$MUSIC_HQ_DIR/$f"
+    done
+    music transformer_q8_0.gguf hq
+    music rvq_depth_decoder_bf16.gguf hq
+    ok "music HQ set complete: $MUSIC_HQ_DIR (q8_0 flow + bf16 depth)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -330,6 +433,10 @@ else
 export API_URL="http://127.0.0.1:11434/v1"
 export K0B0L_IMAGE_MODELS="$MODELS_DIR"
 export K0B0L_SD_BIN="$SD_DIR/build/bin/sd-cli"
+export K0B0L_AUDIO_DIR="$AUDIO_DIR"
+export K0B0L_AUDIO_BIN="$AUDIO_DIR/build/bin/audiocpp_cli"
+export K0B0L_MUSIC_MODELS="$MUSIC_MODELS_DIR"
+export K0B0L_MUSIC_HQ_DIR="$MUSIC_HQ_DIR"
 export CHAT_MODEL="Gemma-4-E4B-Abliterated-i1-Q4_K_M"
 EOF
   ok "~/.k0b0l.env written — source it: source ~/.k0b0l.env"
@@ -447,7 +554,10 @@ else
 fi
 say "model inventory:"
 ls -lh "$LLM_MODELS_DIR" 2>/dev/null | tail -n +2 | awk '{printf "  %-55s %s\n", $9, $5}'
-ls -lh "$MODELS_DIR" 2>/dev/null | grep -v '\.done' | tail -n +2 | awk '{printf "  %-55s %s\n", $9, $5}'
+ls -lh "$MODELS_DIR" 2>/dev/null | grep -v '\.done\|MiniMax\|minimax' | tail -n +2 | awk '{printf "  %-55s %s\n", $9, $5}'
+say "music models:"
+ls -lh "$MUSIC_MODELS_DIR" 2>/dev/null | grep -v '^d' | tail -n +2 | awk '{printf "  %-55s %s\n", $9, $5}'
+ls -lh "$MUSIC_HQ_DIR" 2>/dev/null | grep -v '^d\|^l' | tail -n +2 | awk '{printf "  HQ %-52s %s\n", $9, $5}'
 
 cat <<EOF
 
@@ -461,19 +571,23 @@ cat <<EOF
    python3 $REPO_DIR/thinlizzy.py --chat            # the Textual chat
 
  Image generation: the card is swapped on demand by the supervisor
- (:7861). macOS: image generation runs CPU-only and is slow.
+ (:7861). Music generation likewise — the 🎵 dialog in the webui or the
+ generate_music tool; pass quality="hq" (or pick hq in the dialog) for
+ the q8_0-flow + bf16-depth set that high step counts (60-100) need.
+ macOS: image and music generation run CPU-only and are slow.
 
- Windows (manual, honest): the fork ships Windows CUDA binaries on the
- same release page (llama-...-bin-win-cuda-12.4-x64.zip plus the matching
- cudart zip; extract both into $K0B0L_HOME/llama-prism). Download the
- same model files into llama-prism\\models. Start the router in a
- terminal:
-   llama-server.exe --models-dir models --models-preset models.ini ^
-     --models-max 1 --host 0.0.0.0 --port 11434
- Build sd.cpp from source with CMake + the CUDA toolkit, or use the
- WSL2 route: this script runs as-is under WSL2 (Ubuntu), with the
- Windows NVIDIA driver in place — that is the supported Windows path.
- The webui and the harness then talk to http://127.0.0.1:11434/v1 from
- Windows by setting API_URL in ~/.k0b0l.env.
+ Windows — three routes, pick one:
+   1. WSL2 (recommended): install WSL2 + Ubuntu, connect the Windows
+      NVIDIA driver (wsl --install), then run this script unchanged
+      inside the WSL2 shell. Full stack including the swap supervisor.
+   2. Native: run setup_full.ps1 (PowerShell, repo root) — installs the
+      llama router + models + webui natively, audio.cpp from prebuilt
+      CUDA zips, sd.cpp from source. No swap supervisor on native
+      Windows: only one GPU service at a time (stop llama before a
+      music/image run; scripts/start-all.ps1 orchestrates).
+   3. Manual native: llama-server.exe from the prism release
+      ($PRISM_TAG windows zips + cudart zip), models into
+      llama-prism\\models, python + pip install -r requirements.txt,
+      python tools/webui.py. Point ~/.k0b0l.env API_URL at the router.
 ============================================================================
 EOF

@@ -788,21 +788,42 @@ dialog button.primary:hover { color: var(--accent-ink); }
       placeholder="[verse]&#10;..."></textarea>
   </label>
   <div class="img-grid">
-    <label class="opt-label">duration (seconds)
-      <input id="music-duration" type="number" min="1" max="240" value="30">
-    </label>
-    <label class="opt-label">steps
-      <input id="music-steps" type="number" min="10" max="60" value="30">
-    </label>
-    <label class="opt-label">decode graph arena (MB)
-      <input id="music-decode-arena" type="number" min="32" max="4096" value="2048">
-    </label>
-    <label class="opt-label">seed
-      <input id="music-seed" type="number" min="0" placeholder="random">
-    </label>
-  </div>
-  <div class="opt-faint" style="font-size:11px;">about two minutes of
-    wait per ten seconds of audio on this GPU</div>
+      <label class="opt-label">duration (seconds)
+        <input id="music-duration" type="number" min="1" max="240" value="30">
+      </label>
+      <label class="opt-label">steps (flow)
+        <input id="music-steps" type="number" min="10" max="100" value="30">
+      </label>
+      <label class="opt-label">guidance scale
+        <input id="music-guidance" type="number" step="0.1" min="0.1" max="5.0" value="1.7">
+      </label>
+      <label class="opt-label">ar guidance
+        <input id="music-ar-guidance" type="number" step="0.1" min="0.1" max="5.0" value="1.5">
+      </label>
+      <label class="opt-label">top-k
+        <input id="music-topk" type="number" min="1" max="200" value="50">
+      </label>
+      <label class="opt-label">decode graph arena (MB)
+        <input id="music-decode-arena" type="number" min="32" max="4096" value="2048">
+      </label>
+      <label class="opt-label">seed
+        <input id="music-seed" type="number" min="0" placeholder="random">
+      </label>
+      <label class="opt-label">flow uncond interval
+        <input id="music-flow-uncond" type="number" min="1" max="8" value="1">
+      </label>
+      <label class="opt-label">flow uncond warmup
+        <input id="music-flow-warmup" type="number" min="0" max="10" value="2">
+      </label>
+      <label class="opt-label">quality
+        <select id="music-quality">
+          <option value="stock">stock — q4_0 flow (fast, steps saturate)</option>
+          <option value="hq">hq — q8_0 flow + bf16 depth (slower, best)</option>
+        </select>
+      </label>
+      </div>
+    <div class="opt-faint" style="font-size:11px;">about two minutes of
+      wait per ten seconds of audio on this GPU. Higher steps/guidance = better quality, slower.</div>
   </div>
   <div class="opt-actions">
     <button id="music-cancel">cancel</button>
@@ -2300,10 +2321,21 @@ document.getElementById("music-generate").addEventListener("click", () => {
       document.getElementById("music-duration").value, 10) || 30,
     steps: parseInt(
       document.getElementById("music-steps").value, 10) || 30,
+    guidance_scale: parseFloat(
+      document.getElementById("music-guidance").value) || 1.7,
+    ar_guidance_scale: parseFloat(
+      document.getElementById("music-ar-guidance").value) || 1.5,
+    top_k: parseInt(
+      document.getElementById("music-topk").value, 10) || 50,
     decode_graph_arena_mb: parseInt(
       document.getElementById("music-decode-arena").value, 10) || 2048,
     seed: parseInt(
       document.getElementById("music-seed").value, 10) || 0,
+    flow_uncond_interval: parseInt(
+      document.getElementById("music-flow-uncond").value, 10) || 1,
+    flow_uncond_warmup: parseInt(
+      document.getElementById("music-flow-warmup").value, 10) || 2,
+    quality: document.getElementById("music-quality").value || "stock",
   };
   musicDialog.close();
   ws.send(JSON.stringify({ music: payload }));
@@ -4716,6 +4748,39 @@ def main() -> int:
                 decode_graph_arena_mb = 0
             if decode_graph_arena_mb:
                 args["decode_graph_arena_mb"] = decode_graph_arena_mb
+            try:
+                guidance_scale = float(music.get("guidance_scale") or 0)
+            except (TypeError, ValueError):
+                guidance_scale = 0
+            if guidance_scale:
+                args["guidance_scale"] = guidance_scale
+            try:
+                ar_guidance_scale = float(music.get("ar_guidance_scale") or 0)
+            except (TypeError, ValueError):
+                ar_guidance_scale = 0
+            if ar_guidance_scale:
+                args["ar_guidance_scale"] = ar_guidance_scale
+            try:
+                top_k = int(music.get("top_k") or 0)
+            except (TypeError, ValueError):
+                top_k = 0
+            if top_k:
+                args["top_k"] = top_k
+            try:
+                flow_uncond_interval = int(music.get("flow_uncond_interval") or 0)
+            except (TypeError, ValueError):
+                flow_uncond_interval = 0
+            if flow_uncond_interval:
+                args["flow_uncond_interval"] = flow_uncond_interval
+            try:
+                flow_uncond_warmup = int(music.get("flow_uncond_warmup") or 0)
+            except (TypeError, ValueError):
+                flow_uncond_warmup = 0
+            if flow_uncond_warmup:
+                args["flow_uncond_warmup"] = flow_uncond_warmup
+            quality = str(music.get("quality") or "").strip().lower()
+            if quality in ("stock", "hq"):
+                args["quality"] = quality
             if GEN["active"] is not None:
                 await websocket.send_json({
                     "kind": "notice",

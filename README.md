@@ -31,9 +31,12 @@ python3 tools/webui.py                              # http://LAN-IP:8321
 sudo systemctl start k0b0l-webui                    # or as a service (see docs/webui)
 ```
 
-A fresh machine — LLM server, image models, sd.cpp build, systemd
-services, everything — is one script: `bash setup_full.sh` (Linux
-first-class; see its header for Windows/WSL2 and macOS notes).
+A fresh machine — LLM server, image models, music engine, sd.cpp build,
+systemd services, everything — is one script: `bash setup_full.sh`
+(Linux first-class; WSL2 recommended for Windows). Native Windows:
+`setup_full.ps1` (llama router + music engine + webui; `scripts/start-all.ps1`
+orchestrates the one-service-at-a-time GPU rule). See each script's
+header for scope and macOS notes.
 
 `thinlizzy.sh` is the original shell implementation. It still works and still
 parses the same environment, but the Python package supersedes it: adding a
@@ -65,9 +68,14 @@ rt_harness/
 tools/
   webui.py        the browser UI: one-file FastAPI app, served page, WS
   imagegen.py     local image generation runner (txt2img/img2img/inpaint)
-  gpu_swap_server.py  the swap supervisor: one 8 GB card, two services
+  audiogen.py     local music generation runner (MiniMax-Music3; --quality hq
+                  swaps in the q8_0 flow transformer + bf16 depth decoder
+                  that high step counts need)
+  gpu_swap_server.py  the swap supervisor: one 8 GB card, three services
   gen_catalog.py  regenerates the deployment catalog
-setup_full.sh     fresh-OS installer: backend, models, services
+setup_full.sh     fresh-OS installer: backend, models, services (Linux/WSL2)
+setup_full.ps1    the Windows native installer (router + music + webui)
+scripts/          Windows service helpers (start-router/webui/all)
 ops/              systemd unit sources (k0b0l-llama, k0b0l-swap)
 skills/           shipped skills (research, storytelling, ...)
 docs/             capability docs, written for the model as much as for you
@@ -168,6 +176,33 @@ router, loads the image model, generates, and hands the card back — the
 workflow that would otherwise be a manual stop/generate/restart. The harness
 and the web UI both drive it automatically; remote scripts can call its HTTP
 API directly. See `docs/imagegen` and `docs/gpu-services`.
+
+## Music
+
+K0B0L generates full songs locally on the same GPU — MiniMax-Music3 via
+audio.cpp (`tools/audiogen.py`), with lyrics conditioning and the same
+swap-supervisor interlock as images (a run owns the card for its duration;
+the supervisor refuses to kill a live generation for a text turn).
+
+Quality has two component sets, and the difference is not cosmetic: the
+stock set (q4_0 flow transformer) saturates — more steps stop helping,
+which reads as "the step knob is broken". The **HQ set** (q8_0 flow
+transformer + bf16 depth decoder, `--quality hq` / the webui dropdown)
+is the denoiser upgrade that makes step counts 60-100 pay off. The q8_0
+language model is deliberately absent: the engine cudaMallocs the full
+weight buffer on device, and 9.4 GiB does not fit an 8 GB card.
+
+Duration is an AR frame *budget*, not a floor — the model may EOS early
+(a 200 s request can render ~100 s). Wall time is real: ~2 min per 10 s
+of audio on the reference card, scaling up with steps and the HQ set; a
+240 s HQ song at high steps is an hours-long run. The webui's music
+dialog exposes every knob: duration, steps (10-100), guidance scales,
+top-k, flow-CFG reuse, seed, and the quality set.
+
+```bash
+python3 tools/audiogen.py gen "caption" --lyrics "[verse] ..." \
+    --duration 240 --steps 80 --quality hq --out song.wav
+```
 
 ## Browser UI
 

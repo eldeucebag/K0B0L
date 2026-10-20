@@ -1039,6 +1039,12 @@ class Workspace:
         steps: int = 0,
         seed: int = 0,
         decode_graph_arena_mb: int = 0,
+        guidance_scale: float = 0,
+        ar_guidance_scale: float = 0,
+        top_k: int = 0,
+        flow_uncond_interval: int = 0,
+        flow_uncond_warmup: int = 0,
+        quality: str = "",
     ) -> ToolResult:
         """Generate a music clip locally and save it into the workspace.
 
@@ -1082,6 +1088,18 @@ class Workspace:
             argv += ["--steps", str(steps)]
         if seed:
             argv += ["--seed", str(seed)]
+        if guidance_scale:
+            argv += ["--guidance-scale", str(guidance_scale)]
+        if ar_guidance_scale:
+            argv += ["--ar-guidance-scale", str(ar_guidance_scale)]
+        if top_k:
+            argv += ["--top-k", str(top_k)]
+        if flow_uncond_interval:
+            argv += ["--flow-uncond-interval", str(flow_uncond_interval)]
+        if flow_uncond_warmup:
+            argv += ["--flow-uncond-warmup", str(flow_uncond_warmup)]
+        if quality:
+            argv += ["--quality", str(quality)]
         if decode_graph_arena_mb:
             argv += ["--decode-graph-arena-mb", str(decode_graph_arena_mb)]
         argv += ["--out", str(out_dir / f"music-{int(time.time())}.wav")]
@@ -1146,8 +1164,16 @@ class Workspace:
                 text=True)
             stderr_tail: list[str] = []
             # Measured RTF ~10 on this card; the runner also enforces its
-            # own budget, this is the outer net.
-            budget = 240 + 20 * max(1, min(int(duration or 30), 240))
+            # own budget, this is the outer net. Scale it with steps and
+            # quality the same way the runner does, or long high-step/HQ
+            # runs are killed here first: a measured 120 s @ 80-step run
+            # needed ~58 min (the flat 46-min budget killed it mid-flow).
+            run_steps = max(1, min(int(steps or 30), 100))
+            run_duration = max(1, min(int(duration or 30), 240))
+            step_wall = max(0, run_steps - 30) * 0.45 * run_duration
+            if quality == "hq":
+                step_wall *= 1.9
+            budget = 240 + 20 * run_duration + step_wall
             deadline = time.monotonic() + budget
             import selectors
 
@@ -1625,13 +1651,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
             "steps": {
                 "type": "integer",
-                "description": "Quality/speed trade-off, 10-60 (default 30)",
+                "description": "Flow matching Euler steps per chunk, 10-100 (default 30). Higher = better quality, slower.",
                 "default": 30,
             },
             "seed": {
                 "type": "integer",
                 "description": "Reproducibility seed (0 = time-based)",
                 "default": 0,
+            },
+            "guidance_scale": {
+                "type": "number",
+                "description": "Flow transformer CFG scale (default 1.7). Higher = more prompt adherence.",
+                "default": 1.7,
+            },
+            "ar_guidance_scale": {
+                "type": "number",
+                "description": "Autoregressive semantic/depth CFG scale (default 1.5). Higher = more structured.",
+                "default": 1.5,
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "Top-k sampling for semantic/depth codes (default 50). Lower = more deterministic.",
+                "default": 50,
+            },
+            "flow_uncond_interval": {
+                "type": "integer",
+                "description": "Flow CFG reuse interval: evaluate uncond every N steps (1 = exact, 2-4 = ~15-20% faster, small quality cost).",
+                "default": 1,
+            },
+            "flow_uncond_warmup": {
+                "type": "integer",
+                "description": "Initial flow steps with full CFG before reuse kicks in (default 2).",
+                "default": 2,
+            },
+            "quality": {
+                "type": "string",
+                "enum": ["stock", "hq"],
+                "description": "Component precision set. stock = q4_0 flow "
+                               "transformer + q8_0 depth decoder (fast, lower "
+                               "ceiling: more steps stop helping). hq = q8_0 "
+                               "flow transformer + bf16 depth decoder over the "
+                               "same q4_0 lm -- the denoiser upgrade that "
+                               "makes high step counts pay off. Slower "
+                               "(~1.3x flow time); use for songs meant to be "
+                               "kept, especially at 60 s+.",
+                "default": "stock",
             },
         },
         ["caption"],

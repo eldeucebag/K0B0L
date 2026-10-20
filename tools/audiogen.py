@@ -33,6 +33,8 @@ ENGINE_CLI = Path(os.environ.get(
     str(ENGINE_DIR / "build" / "bin" / "audiocpp_cli")))
 MODEL_DIR = Path(os.environ.get(
     "K0B0L_MUSIC_MODELS", "/mnt/k0b0l-models/MiniMax-Music3-GGUF"))
+HQ_MODEL_DIR = Path(os.environ.get(
+    "K0B0L_MUSIC_HQ_DIR", "/home/jeff/models/minimax-hq"))
 OUT_DIR = Path(os.environ.get(
     "K0B0L_MUSIC_DIR", str(Path(__file__).resolve().parent.parent / "audio")))
 SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
@@ -42,6 +44,18 @@ SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
 # tail adds proportional time). 20 keeps margin over that for NTFS
 # weight loads and the longer AR frames at big durations.
 WALL_PER_AUDIO_SEC = 20.0
+# Flow stage wall scales with steps: measured 120 s @ 80 steps blew the
+# flat budget at ~58 min (46-min budget for ~30-step pacing). Extra
+# steps add roughly (steps - 30) * 0.45 s of flow wall per second of
+# audio, so the budget must scale or high-step runs die mid-render.
+WALL_PER_AUDIO_SEC_PER_STEP = 0.45
+# HQ upgrades only the flow transformer (q4_0 -> q8_0, ~1.9x bytes) and
+# depth decoder (q8_0 -> bf16, ~1.8x): the AR stage and its LM are
+# unchanged, so HQ scales the STEP (flow) term only, not the whole
+# wall. 0.45 is already ~2.3x the measured stock lower bound
+# (wall(80)>2640s vs wall(50)=1944s => >=0.19 s/s/step), and the same
+# margin is kept for HQ at 1.9x.
+WALL_HQ_STEP_FACTOR = 1.9
 MIN_WALL = 240.0
 # VRAM ceiling, measured not guessed: free after the 5729 MiB q4_0 LM
 # and compute workspace ~1.92 GiB; KV is 0.281 MiB/step (36 layers,
@@ -50,7 +64,7 @@ MIN_WALL = 240.0
 # length and the flow/vocoder tail. duration_sec is an AR frame
 # budget, not a hard waveform cap -- the rendered clip can run longer.
 MAX_DURATION = 240
-MAX_STEPS = 60
+MAX_STEPS = 100
 
 # Adaptive KV budget (the HF low-VRAM recipe, translated for a
 # one-process engine with no layer offloading): the decode graph holds
@@ -60,7 +74,9 @@ MAX_STEPS = 60
 # ~1906 MiB and OOM'd. The runner clamps duration so the whole
 # prompt+frames allocation stays inside what the card has left.
 KV_MI_PER_STEP = 0.281          # measured: 36 L, F16, 8 kvh, CFG x2
-# Calibrated from the two measured endpoints on this card:
+# Calibrated from the two measured endpoints on this card (weights are
+# DEVICE-resident: an HQ smoke run proved it by failing to cudaMalloc
+# the full 9.4 GiB q8_0 LM buffer):
 #   PASS: 120 s user prompt, ~680 est prompt steps -> decode alloc
 #         (680 + 3000) x 0.281 = 1030 MiB, ran clean to a 119.8 s clip.
 #   FAIL: skill prompt (59w caption + 297w lyrics -> ~267 est steps),
@@ -68,6 +84,9 @@ KV_MI_PER_STEP = 0.281          # measured: 36 L, F16, 8 kvh, CFG x2
 #         "allocating 1906.58 MiB ... out of memory".
 # Headroom therefore sits between those; 1300 keeps a real margin under
 # the failing point while allowing everything that has ever passed.
+# (The mid-run nvidia-smi reading of ~1.7 GiB during a stock 120 s run
+# is the FLOW phase -- mem_saver has already released the AR weights;
+# it is NOT evidence of host-streamed weights.)
 KV_HEADROOM_MI = 1300.0
 # q8_0 KV cache halves the per-step cost (0.281 -> 0.141 MiB) with a
 # small quality margin and ~10-15% AR speed cost -- the standard
@@ -89,6 +108,19 @@ def _kv_duration_cap(caption: str, lyrics: str,
                       MAX_PROMPT_STEPS)
     steps_free = max(0, int(KV_HEADROOM_MI / kv_mi_per_step) - prompt_steps)
     return max(1, steps_free // 25)
+
+
+# High-quality component set for an 8 GB card. MEASURED (the failed
+# smoke run): the engine cudaMalloc's the FULL language-model weight
+# buffer on device -- a 9.4 GiB q8_0 LM can never fit. So HQ keeps the
+# stock q4_0 LM (the AR semantic stage) and upgrades only the stages
+# the step knob actually drives: the flow transformer q4_0 -> q8_0
+# (1.40 -> 2.61 GB, both device-resident during the flow phase beside
+# ~1.9 GiB compute) and the RVQ depth decoder q8_0 -> bf16
+# (0.71 -> 1.29 GB). This is where "more steps changes nothing"
+# actually lives: a q4_0 denoiser saturates no matter the Euler count.
+HQ_TRANSFORMER = "transformer_q8_0.gguf"
+HQ_DEPTH = "rvq_depth_decoder_bf16.gguf"
 
 
 def _post(path: str, payload: bytes, timeout: int) -> tuple[bool, str]:
@@ -159,13 +191,36 @@ def _progress(current: int, total: int) -> None:
 
 def generate(caption: str, out_path: Path, lyrics: str = "",
              duration: int = 0, steps: int = 0, seed: int = 0,
-             decode_graph_arena_mb: int = 0) -> bool:
+             decode_graph_arena_mb: int = 0, guidance_scale: float = 0,
+             ar_guidance_scale: float = 0, top_k: int = 0,
+             flow_uncond_interval: int = 0, flow_uncond_warmup: int = 0,
+             quality: str = "") -> bool:
     """Run one generation; returns True iff ``out_path`` exists after."""
     if not ENGINE_CLI.is_file():
         print(f"music engine not built: {ENGINE_CLI}", file=sys.stderr)
         return False
-    if not MODEL_DIR.is_dir():
-        print(f"music model files missing: {MODEL_DIR}", file=sys.stderr)
+    model_dir = MODEL_DIR
+    session_options: list[tuple[str, str]] = []
+    hq = (quality or "").strip().lower() in ("hq", "high", "highq")
+    if hq:
+        wanted = {
+            "minimax_music3.flow_transformer_gguf": HQ_TRANSFORMER,
+            "minimax_music3.rvq_depth_decoder_gguf": HQ_DEPTH,
+        }
+        if all((HQ_MODEL_DIR / name).is_file() for name in wanted.values()):
+            model_dir = HQ_MODEL_DIR
+            session_options = list(wanted.items())
+            print("PHASE hq components: q8_0 flow transformer + bf16 "
+                  "depth decoder over the stock q4_0 lm", file=sys.stderr,
+                  flush=True)
+        else:
+            missing = [name for name in wanted.values()
+                       if not (HQ_MODEL_DIR / name).is_file()]
+            print(f"PHASE hq components missing ({', '.join(missing)}); "
+                  "falling back to the stock q4_0 set", file=sys.stderr,
+                  flush=True)
+    if not model_dir.is_dir():
+        print(f"music model files missing: {model_dir}", file=sys.stderr)
         return False
     duration = max(1, min(int(duration or 30), MAX_DURATION))
     steps = max(0, min(int(steps or 30), MAX_STEPS))
@@ -205,12 +260,14 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
         # so a silent NTFS weight load still hits the deadline.
         argv = [
             str(ENGINE_CLI), "--task", "gen", "--family", "minimax_music3",
-            "--model", str(MODEL_DIR), "--backend", "cuda", "--log",
+            "--model", str(model_dir), "--backend", "cuda", "--log",
             "--session-option", f"minimax_music3.kv_cache_type={kv_cache_type}",
             "--text", caption or "instrumental music",
             "--request-option", f"duration_sec={duration}",
             "--out", str(out_path),
         ]
+        for opt_name, opt_value in session_options:
+            argv += ["--session-option", f"{opt_name}={opt_value}"]
         if lyrics:
             argv += ["--request-option", f"lyrics={lyrics}"]
         else:
@@ -223,6 +280,16 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
             argv += ["--request-option", f"num_inference_steps={steps}"]
         if seed:
             argv += ["--request-option", f"seed={seed}"]
+        if guidance_scale:
+            argv += ["--request-option", f"guidance_scale={guidance_scale}"]
+        if ar_guidance_scale:
+            argv += ["--request-option", f"ar_guidance_scale={ar_guidance_scale}"]
+        if top_k:
+            argv += ["--request-option", f"top_k={top_k}"]
+        if flow_uncond_interval:
+            argv += ["--request-option", f"flow_uncond_interval={flow_uncond_interval}"]
+        if flow_uncond_warmup:
+            argv += ["--request-option", f"flow_uncond_warmup={flow_uncond_warmup}"]
         if decode_graph_arena_mb:
             argv += ["--request-option", f"minimax_music3.decode_graph_arena_mb={decode_graph_arena_mb}"]
         env = dict(os.environ, GGML_CUDA_NO_VMM="1")
@@ -233,7 +300,11 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
         assert process.stdout is not None and process.stderr is not None
         _register_engine(process.pid)
         tail: list[str] = []
-        deadline = time.monotonic() + MIN_WALL + WALL_PER_AUDIO_SEC * duration
+        step_wall = max(0, steps - 30) * WALL_PER_AUDIO_SEC_PER_STEP * duration
+        if hq:
+            step_wall *= WALL_HQ_STEP_FACTOR
+        wall = MIN_WALL + WALL_PER_AUDIO_SEC * duration + step_wall
+        deadline = time.monotonic() + wall
         import selectors
 
         sel = selectors.DefaultSelector()
@@ -314,7 +385,10 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in ("gen", "swapfree", "swapback", "state"):
         print("usage: audiogen.py gen <caption> [--lyrics TEXT] "
-              "[--duration N] [--steps N] [--seed N] [--out PATH] | "
+              "[--duration N] [--steps N] [--seed N] [--out PATH] "
+              "[--guidance-scale F] [--ar-guidance-scale F] [--top-k N] "
+              "[--flow-uncond-interval N] [--flow-uncond-warmup N] "
+              "[--decode-graph-arena-mb N] [--quality stock|hq] | "
               "swapfree | swapback | state", file=sys.stderr)
         return 2
     if argv[0] == "swapback":
@@ -343,6 +417,12 @@ def main(argv: list[str]) -> int:
     steps = 0
     seed = 0
     decode_graph_arena_mb = 0
+    guidance_scale = 0
+    ar_guidance_scale = 0
+    top_k = 0
+    flow_uncond_interval = 0
+    flow_uncond_warmup = 0
+    quality = ""
     out = OUT_DIR / f"music-{int(time.time())}.wav"
     i = 2
     while i < len(argv):
@@ -359,8 +439,26 @@ def main(argv: list[str]) -> int:
         elif flag == "--seed":
             seed = int(value or 0)
             i += 2
+        elif flag == "--guidance-scale":
+            guidance_scale = float(value or 0)
+            i += 2
+        elif flag == "--ar-guidance-scale":
+            ar_guidance_scale = float(value or 0)
+            i += 2
+        elif flag == "--top-k":
+            top_k = int(value or 0)
+            i += 2
+        elif flag == "--flow-uncond-interval":
+            flow_uncond_interval = int(value or 0)
+            i += 2
+        elif flag == "--flow-uncond-warmup":
+            flow_uncond_warmup = int(value or 0)
+            i += 2
         elif flag == "--decode-graph-arena-mb":
             decode_graph_arena_mb = int(value or 0)
+            i += 2
+        elif flag == "--quality":
+            quality = value
             i += 2
         elif flag == "--out":
             out = Path(value)
@@ -369,7 +467,10 @@ def main(argv: list[str]) -> int:
             print(f"unknown flag: {flag}", file=sys.stderr)
             return 2
     ok = generate(caption, out, lyrics=lyrics, duration=duration,
-                  steps=steps, seed=seed, decode_graph_arena_mb=decode_graph_arena_mb)
+                  steps=steps, seed=seed, decode_graph_arena_mb=decode_graph_arena_mb,
+                  guidance_scale=guidance_scale, ar_guidance_scale=ar_guidance_scale,
+                  top_k=top_k, flow_uncond_interval=flow_uncond_interval,
+                  flow_uncond_warmup=flow_uncond_warmup, quality=quality)
     if not ok:
         return 1
     print(f"saved {out}")
