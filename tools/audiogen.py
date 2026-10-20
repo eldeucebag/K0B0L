@@ -69,18 +69,25 @@ KV_MI_PER_STEP = 0.281          # measured: 36 L, F16, 8 kvh, CFG x2
 # Headroom therefore sits between those; 1300 keeps a real margin under
 # the failing point while allowing everything that has ever passed.
 KV_HEADROOM_MI = 1300.0
+# q8_0 KV cache halves the per-step cost (0.281 -> 0.141 MiB) with a
+# small quality margin and ~10-15% AR speed cost -- the standard
+# llama.cpp recipe for 8 GB cards. The runner switches to it whenever
+# the f16 budget cannot cover the asked duration, so full-length songs
+# (240 s) generate regardless of prompt size instead of clamping.
+KV_MI_PER_STEP_Q8 = 0.141
 WORDS_TO_PROMPT_STEPS = 0.75    # est tokenized steps per word of
                                 # caption+lyrics (engine caps at 5000)
 MAX_PROMPT_STEPS = 5000         # engine hard cap (HF README)
 
 
-def _kv_duration_cap(caption: str, lyrics: str) -> int:
+def _kv_duration_cap(caption: str, lyrics: str,
+                     kv_mi_per_step: float = KV_MI_PER_STEP) -> int:
     """The largest duration (seconds) whose decode KV fits beside the
     weights, given the prompt this run will tokenize."""
     words = len((caption or "").split()) + len((lyrics or "").split())
     prompt_steps = min(int(words * WORDS_TO_PROMPT_STEPS),
                       MAX_PROMPT_STEPS)
-    steps_free = max(0, int(KV_HEADROOM_MI / KV_MI_PER_STEP) - prompt_steps)
+    steps_free = max(0, int(KV_HEADROOM_MI / kv_mi_per_step) - prompt_steps)
     return max(1, steps_free // 25)
 
 
@@ -164,16 +171,26 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
     steps = max(0, min(int(steps or 30), MAX_STEPS))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Adaptive duration clamp: the engine allocates the FULL decode KV
-    # (prompt + duration x 25 frames) up front. A long structured
-    # caption + lyrics can consume the whole KV budget on its own and
-    # OOM the decode graph regardless of the swap guard. Clamp to what
-    # the card can actually hold for THIS prompt, and say so.
-    kv_cap = _kv_duration_cap(caption or "", lyrics or "")
+    # Adaptive KV budget: the engine allocates the FULL decode KV
+    # (prompt + duration x 25 frames) up front. If f16 cannot cover the
+    # asked duration for this prompt, switch to q8_0 KV (half the bytes,
+    # small quality margin) BEFORE clamping -- a full-length song beats
+    # a truncated one. Only when even q8_0 cannot cover it does the
+    # duration clamp (extremely long prompts at 240 s).
+    kv_cache_type = "f16"
+    if duration > _kv_duration_cap(caption or "", lyrics or ""):
+        kv_cache_type = "q8_0"
+        print(f"PHASE switching to q8_0 KV cache: f16 cannot hold "
+              f"{duration}s for this prompt size (q8_0 halves KV "
+              f"VRAM; small quality margin)", file=sys.stderr,
+              flush=True)
+    kv_cap = _kv_duration_cap(caption or "", lyrics or "",
+                              KV_MI_PER_STEP_Q8
+                              if kv_cache_type == "q8_0"
+                              else KV_MI_PER_STEP)
     if duration > kv_cap:
-        print(f"PHASE duration {duration}s exceeds the KV budget for "
-              f"this prompt size; clamping to {kv_cap}s "
-              f"(long captions+lyrics cost VRAM)", file=sys.stderr,
+        print(f"PHASE duration {duration}s still exceeds the KV budget "
+              f"even at q8_0; clamping to {kv_cap}s", file=sys.stderr,
               flush=True)
         duration = kv_cap
 
@@ -189,6 +206,7 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
         argv = [
             str(ENGINE_CLI), "--task", "gen", "--family", "minimax_music3",
             "--model", str(MODEL_DIR), "--backend", "cuda", "--log",
+            "--session-option", f"minimax_music3.kv_cache_type={kv_cache_type}",
             "--text", caption or "instrumental music",
             "--request-option", f"duration_sec={duration}",
             "--out", str(out_path),
