@@ -37,10 +37,11 @@ OUT_DIR = Path(os.environ.get(
     "K0B0L_MUSIC_DIR", str(Path(__file__).resolve().parent.parent / "audio")))
 SWAP_API = os.environ.get("K0B0L_SWAP_API", "http://127.0.0.1:7861")
 
-# Measured on the 1070 (Q4_0 LM): 10 s of audio = 95 s wall, 30 s =
-# 315 s wall. RTF ~10, mostly the AR stage; a safety factor covers the
-# flow/vocoder tail and NTFS weight loads.
-WALL_PER_AUDIO_SEC = 12.0
+# Measured on the 1070 (Q4_0 LM): the 120 s / 50-step run took 1944 s
+# wall = ~16 s of wall per second of audio (AR dominates; flow/vocoder
+# tail adds proportional time). 20 keeps margin over that for NTFS
+# weight loads and the longer AR frames at big durations.
+WALL_PER_AUDIO_SEC = 20.0
 MIN_WALL = 240.0
 # VRAM ceiling, measured not guessed: free after the 5729 MiB q4_0 LM
 # and compute workspace ~1.92 GiB; KV is 0.281 MiB/step (36 layers,
@@ -50,6 +51,37 @@ MIN_WALL = 240.0
 # budget, not a hard waveform cap -- the rendered clip can run longer.
 MAX_DURATION = 240
 MAX_STEPS = 60
+
+# Adaptive KV budget (the HF low-VRAM recipe, translated for a
+# one-process engine with no layer offloading): the decode graph holds
+# (prompt_steps + duration x 25) KV steps at 0.281 MiB/step next to the
+# 5729 MiB weights. Long captions+lyrics EAT that budget from the
+# front: the failing 240 s run with full structured lyrics needed
+# ~1906 MiB and OOM'd. The runner clamps duration so the whole
+# prompt+frames allocation stays inside what the card has left.
+KV_MI_PER_STEP = 0.281          # measured: 36 L, F16, 8 kvh, CFG x2
+# Calibrated from the two measured endpoints on this card:
+#   PASS: 120 s user prompt, ~680 est prompt steps -> decode alloc
+#         (680 + 3000) x 0.281 = 1030 MiB, ran clean to a 119.8 s clip.
+#   FAIL: skill prompt (59w caption + 297w lyrics -> ~267 est steps),
+#         duration 240 -> (267 + 6000) x 0.281 = 1908 MiB, the logged
+#         "allocating 1906.58 MiB ... out of memory".
+# Headroom therefore sits between those; 1300 keeps a real margin under
+# the failing point while allowing everything that has ever passed.
+KV_HEADROOM_MI = 1300.0
+WORDS_TO_PROMPT_STEPS = 0.75    # est tokenized steps per word of
+                                # caption+lyrics (engine caps at 5000)
+MAX_PROMPT_STEPS = 5000         # engine hard cap (HF README)
+
+
+def _kv_duration_cap(caption: str, lyrics: str) -> int:
+    """The largest duration (seconds) whose decode KV fits beside the
+    weights, given the prompt this run will tokenize."""
+    words = len((caption or "").split()) + len((lyrics or "").split())
+    prompt_steps = min(int(words * WORDS_TO_PROMPT_STEPS),
+                      MAX_PROMPT_STEPS)
+    steps_free = max(0, int(KV_HEADROOM_MI / KV_MI_PER_STEP) - prompt_steps)
+    return max(1, steps_free // 25)
 
 
 def _post(path: str, payload: bytes, timeout: int) -> tuple[bool, str]:
@@ -131,6 +163,19 @@ def generate(caption: str, out_path: Path, lyrics: str = "",
     duration = max(1, min(int(duration or 30), MAX_DURATION))
     steps = max(0, min(int(steps or 30), MAX_STEPS))
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Adaptive duration clamp: the engine allocates the FULL decode KV
+    # (prompt + duration x 25 frames) up front. A long structured
+    # caption + lyrics can consume the whole KV budget on its own and
+    # OOM the decode graph regardless of the swap guard. Clamp to what
+    # the card can actually hold for THIS prompt, and say so.
+    kv_cap = _kv_duration_cap(caption or "", lyrics or "")
+    if duration > kv_cap:
+        print(f"PHASE duration {duration}s exceeds the KV budget for "
+              f"this prompt size; clamping to {kv_cap}s "
+              f"(long captions+lyrics cost VRAM)", file=sys.stderr,
+              flush=True)
+        duration = kv_cap
 
     if not free_the_card():
         return False

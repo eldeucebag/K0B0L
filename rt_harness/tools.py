@@ -1038,6 +1038,7 @@ class Workspace:
         duration: int = 0,
         steps: int = 0,
         seed: int = 0,
+        decode_graph_arena_mb: int = 0,
     ) -> ToolResult:
         """Generate a music clip locally and save it into the workspace.
 
@@ -1061,6 +1062,16 @@ class Workspace:
         if not runner.is_file():
             return ToolResult(False, "the music service (tools/audiogen.py) "
                               "is not installed in this harness checkout")
+        # Hard cap before anything runs: the card's KV budget is shared
+        # between the prompt and the audio frames, so over-asking the
+        # duration OOMs the decode graph no matter what the runner does
+        # later. The runner clamps adaptively too; this bounds it first.
+        try:
+            duration = int(duration or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration > 240:
+            duration = 240
         out_dir = self.root / "audio"
         argv = [sys.executable, str(runner), "gen", caption or "instrumental music"]
         if lyrics:
@@ -1071,6 +1082,8 @@ class Workspace:
             argv += ["--steps", str(steps)]
         if seed:
             argv += ["--seed", str(seed)]
+        if decode_graph_arena_mb:
+            argv += ["--decode-graph-arena-mb", str(decode_graph_arena_mb)]
         argv += ["--out", str(out_dir / f"music-{int(time.time())}.wav")]
         expected_out = argv[argv.index("--out") + 1]
 
@@ -1124,7 +1137,7 @@ class Workspace:
             stderr_tail: list[str] = []
             # Measured RTF ~10 on this card; the runner also enforces its
             # own budget, this is the outer net.
-            budget = 240 + 15 * max(1, min(int(duration or 30), 300))
+            budget = 240 + 20 * max(1, min(int(duration or 30), 240))
             deadline = time.monotonic() + budget
             import selectors
 
@@ -1592,8 +1605,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
             "duration": {
                 "type": "integer",
-                "description": "Clip length in seconds, 1-240 (default 30; "
-                               "card ceiling ~4 minutes)",
+                "description": "Clip length in seconds, 1-240. The card's "
+                               "KV memory is SHARED between the prompt and "
+                               "the audio: long captions+lyrics reduce the "
+                               "max duration (a 350-word prompt caps around "
+                               "170s; the runner clamps and says so). "
+                               "Default 30; prefer 60-120 for full songs.",
                 "default": 30,
             },
             "steps": {

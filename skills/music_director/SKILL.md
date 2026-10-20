@@ -88,5 +88,5 @@ If a generated result drifts, do not just add "more detail." Diagnose the failur
 - The target genre must permeate instrumentation, vocals, structure, and lyrics — not be tacked on.
 - Concrete sonic nouns over abstract emotion ("detuned supersaw pads with slow attack", not "dreamy").
 - Structurally contradictory requests embed the tension in the tech specs; never silently drop a constraint.
-- Respect the hardware: `duration` max 240s (~4 min AR budget on this GPU); first passes 10–20s iterate fastest. A 120s/50-step run took ~32 min wall.
+- Respect the hardware: `duration` max 240s, and the card's KV memory is SHARED between the caption+lyrics and the audio — long prompts shrink the max duration (a 350-word caption+lyrics caps around 170s; the runner clamps automatically and reports it). Ask for 60–120s for full songs; first passes 10–20s iterate fastest. A 120s/50-step run took ~32 min wall.
 - Quality knobs: `steps` 30–60 (higher = better flow matching, slower). Long captions are fine — the engine handles them, but they slow prefill.
