@@ -190,16 +190,34 @@ def stop_sd() -> None:
 MUSIC_PID_FILE = "/tmp/k0b0l-music-engine.pid"
 
 
-def stop_music_engine() -> None:
+def stop_music_engine(force: bool = False) -> bool:
     """Kill a registered music engine (audio.cpp one-shot CLI) if one
     is running. The runner registers its PID at spawn and unregisters
     at exit; a stale file (crash) is cleaned as a no-op. Without this,
     a Cancel mid-generation would leave the CLI holding the card while
-    llama tries to load."""
+    llama tries to load.
+
+    Returns True when an engine is registered (alive or not). Unless
+    ``force`` is set, a LIVE engine is REFUSED: a music run is a
+    30-60 minute generation, and killing one because a text turn
+    happened to ask for the llm service back (the webui's auto-restore
+    on "the llm service is down") destroys an hour of work for nothing.
+    Only an explicit Cancel (force=True) may stop a live engine; the
+    runner's own exit path unregisters the PID, so a stale file still
+    cleans up as before."""
     try:
         pid = int(open(MUSIC_PID_FILE).read().strip())
     except (OSError, ValueError):
-        return
+        return False
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except OSError:
+        alive = False
+    if alive and not force:
+        # Live generation in flight: leave it alone. The runner will
+        # POST /swap/llm when it finishes.
+        return True
     try:
         os.kill(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
@@ -219,6 +237,7 @@ def stop_music_engine() -> None:
         os.unlink(MUSIC_PID_FILE)
     except OSError:
         pass
+    return True
 
 
 def start_llama() -> None:
@@ -259,11 +278,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/state":
+            music_live = False
+            try:
+                pid = int(open(MUSIC_PID_FILE).read().strip())
+                os.kill(pid, 0)
+                music_live = True
+            except (OSError, ValueError):
+                pass
             self._json(200, {
                 "llm": healthy(LLAMA_URL),
                 "image": image_healthy(),
                 "image_model": current_image_model,
                 "image_models": list(IMAGE_MODELS),
+                "music": music_live,
             })
         elif self.path == "/progress":
             # Live sampling steps from the sd-server's log; None when it
@@ -305,8 +332,20 @@ class Handler(BaseHTTPRequestHandler):
                                       f"see {SD_LOG}"})
         elif self.path == "/swap/llm":
             with _STATE_LOCK:
+                # A LIVE music engine refuses the kill (stop_music_engine
+                # returns True without stopping it). Starting llama
+                # beside it would OOM both, so the whole swap refuses:
+                # the runner owns the card until its generation lands.
+                music_live = stop_music_engine()
+                if music_live:
+                    self._json(409, {"ok": False,
+                                     "error": "a music generation is "
+                                              "running; it owns the GPU "
+                                              "and will restore the llm "
+                                              "service when it finishes "
+                                              "(cancel it to stop now)"})
+                    return
                 stop_sd()
-                stop_music_engine()
                 stop_llama()
                 start_llama()
             deadline = time.time() + 120
@@ -324,15 +363,41 @@ class Handler(BaseHTTPRequestHandler):
             # "swap" is really "free the card, mark it music-busy, and
             # wait for the runner to POST /swap/llm when it finishes" --
             # exactly the image-run interlock, minus a persistent server.
+            # A live engine likewise refuses: two music runs cannot share
+            # the 8 GB card, and killing the first from under the webui's
+            # turn would destroy an hour of generation.
             with _STATE_LOCK:
+                music_live = stop_music_engine()
+                if music_live:
+                    self._json(409, {"ok": False,
+                                     "error": "a music generation is "
+                                              "already running"})
+                    return
                 stop_sd()
-                stop_music_engine()
                 stop_llama()
             self._json(200, {"ok": True, "service": "music",
                              "note": "card freed; the music runner owns "
                                      "it; POST /swap/llm to restore"})
+        elif self.path == "/swap/music-cancel":
+            # The explicit Cancel path: the ONLY call that may kill a
+            # live music engine (stop_music_engine(force=True)).
+            with _STATE_LOCK:
+                stop_music_engine(force=True)
+                stop_sd()
+                stop_llama()
+                start_llama()
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                if healthy(LLAMA_URL):
+                    self._json(200, {"ok": True, "service": "llm",
+                                     "url": LLAMA_URL})
+                    return
+                time.sleep(1)
+            self._json(503, {"ok": False,
+                             "error": f"llama did not come up; see {LLAMA_LOG}"})
         else:
-            self._json(404, {"error": "POST /swap/image | /swap/llm | /swap/music"})
+            self._json(404, {"error": "POST /swap/image | /swap/llm | "
+                                      "/swap/music | /swap/music-cancel"})
 
     def log_message(self, fmt, *args) -> None:  # quiet
         pass

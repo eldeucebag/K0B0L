@@ -3996,9 +3996,16 @@ def main() -> int:
                 "kind": "notice",
                 "text": f"cancel: bringing the GPU back to the llm "
                         f"service (the {kind_word} is stopped)"})
+            # A music run must die via the FORCE cancel verb: plain
+            # /swap/llm now REFUSES to kill a live music engine (the
+            # 30-60 min generation owns the card), so an operator Cancel
+            # is the one path allowed to take it down.
+            cancel_path = ("/swap/music-cancel"
+                           if "caption" in (run.get("request") or {})
+                           else "/swap/llm")
             try:
                 request = urllib.request.Request(
-                    swap_api + "/swap/llm", data=b"{}",
+                    swap_api + cancel_path, data=b"{}",
                     headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(request, timeout=140) as r:
                     json.loads(r.read())
@@ -4128,6 +4135,21 @@ def main() -> int:
             except Exception:  # noqa: BLE001 - no supervisor, no swap
                 swap_state = None
             async with TURN_LOCK:
+                if swap_state and swap_state.get("music"):
+                    # A music generation owns the card for 30-60 min.
+                    # Killing it to answer a chat message would destroy
+                    # the run (this exact bug killed a healthy replay:
+                    # engine exit -15 mid-AR). Refuse the turn with the
+                    # reason; the music run restores the llm service
+                    # itself when it lands.
+                    await pub(box, {
+                        "kind": "notice",
+                        "text": "a music generation is running on the "
+                                "GPU — text replies are paused until "
+                                "it finishes (cancel the generation "
+                                "to chat now)"})
+                    await pub(box, {"kind": "turn_end"})
+                    return
                 if swap_state and not swap_state.get("llm", True):
                     await pub(box, {"kind": "busy", "on": True})
                     await pub(box, {

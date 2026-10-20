@@ -1109,19 +1109,29 @@ class Workspace:
         # The swap supervisor stops services, but a running llama
         # model keeps its VRAM until evicted. Force unload first.
         try:
-            subprocess.run(  # noqa: S603 - argv list, no shell
+            guard = subprocess.run(  # noqa: S603 - argv list, no shell
                 [sys.executable, str(runner), "swapfree"],
                 capture_output=True, text=True, timeout=180)
         except Exception as exc:
             return ToolResult(False, f"failed to free the GPU for music: {exc}")
+        if guard.returncode != 0:
+            detail = (guard.stderr or "").strip().splitlines()
+            last = detail[-1] if detail else "swap supervisor refused"
+            return ToolResult(False, f"the GPU is busy: {last}")
 
-        # Wait for the swap server to report llm=false
+        # Wait for the swap server to report llm=false AND no live music
+        # engine (a concurrent run owns the card and must finish first).
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(
                         SWAP_API.rstrip("/") + "/state", timeout=2) as r:
                     state = json.loads(r.read())
+                if state.get("music"):
+                    return ToolResult(False, "a music generation is "
+                                      "already running on the GPU; it "
+                                      "must finish (or be cancelled) "
+                                      "before another can start")
                 if not state.get("llm", True):
                     break
             except Exception:
